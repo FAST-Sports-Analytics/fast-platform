@@ -1,0 +1,11 @@
+FAST SPORTS ANALYTICS — WEBSITE DEPLOYMENT
+
+1. Delete the existing "FAST Website" folder from GitHub.
+2. Extract this ZIP on your computer.
+3. Open the extracted folder.
+4. Upload every item inside it to the ROOT of fast-platform.
+5. Confirm package.json and app appear directly on the main repository page.
+6. In Vercel, import fast-platform.
+7. Application Preset should show Next.js.
+8. Root Directory should be ./.
+9. Click Deploy.
