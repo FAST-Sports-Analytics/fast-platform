@@ -2,6 +2,7 @@ import Link from "next/link";
 import { products } from "./site-data";
 import { PageShell } from "./PageShell";
 import { CTA } from "./CTA";
+import { ProductScreenshot } from "./ProductScreenshot";
 
 const productWorkflows: Record<string, readonly [string, string][]> = {
   analysis: [
@@ -36,14 +37,36 @@ const productWorkflows: Record<string, readonly [string, string][]> = {
   ],
 };
 
+const productScreens: Record<string, readonly { src: string; label: string; title: string; text: string; alt: string }[]> = {
+  analysis: [
+    { src: "/product-screenshots/analysis-workspace.webp", label: "FAST Analysis · Live workspace", title: "One workspace for the whole match", text: "Code events, manage the formation, review the timeline and monitor live statistics without leaving the analysis screen.", alt: "FAST Analysis live football workspace with coding buttons, formation, event log and statistics" },
+    { src: "/product-screenshots/analysis-home.webp", label: "FAST Analysis · Workflow selection", title: "Move clearly from live to post-match", text: "Start a matchday coding session or enter the post-match environment from one focused home screen.", alt: "FAST Analysis home screen showing live match and post-match analysis choices" },
+    { src: "/product-screenshots/analysis-modes.webp", label: "FAST Analysis · Analysis modes", title: "Use the same structure with any media source", text: "Run live video, analyse an existing file, log events without video or return to a saved match.", alt: "FAST Analysis mode selection for live video, video file, no video and previous analysis" },
+    { src: "/product-screenshots/analysis-sport-selection.webp", label: "FAST Analysis · Multi-sport setup", title: "Start with the language of your sport", text: "Sport-specific setup adapts the workspace, terminology, match structure and future modules before analysis begins.", alt: "FAST Analysis first-time sport selection screen" },
+  ],
+  viewer: [
+    { src: "/product-screenshots/viewer-dashboard.webp", label: "FAST Viewer · Dashboard", title: "A review space that is ready when the coach opens it", text: "Matches, organisation context and analyst-delivered clips arrive in a focused viewer built for fast conversations.", alt: "FAST Viewer rugby dashboard" },
+    { src: "/product-screenshots/viewer-clips.webp", label: "FAST Viewer · Clip library", title: "Every key moment, organised and searchable", text: "Filter clips, review their status, add flags and capture coach comments in the same workspace.", alt: "FAST Viewer clip library with rugby clips, review flags and coach comments" },
+    { src: "/product-screenshots/viewer-playlists.webp", label: "FAST Viewer · Playlists", title: "Build half-time and post-match presentations in minutes", text: "Group clips, reorder the message and save discussion notes before presenting to the team.", alt: "FAST Viewer half-time review playlist" },
+  ],
+  cloud: [
+    { src: "/product-screenshots/cloud-organisation.webp", label: "FAST Cloud · Organisation management", title: "Control the organisation from one place", text: "See subscriptions, seats, users, products, sports, devices and recent activity through a single administration layer.", alt: "FAST organisation management dashboard showing subscription, seats, devices, users and products" },
+  ],
+};
+
 export function ProductPage({ slug }: { slug: string }) {
   const product = products.find((item) => item.slug === slug)!;
   const planned = product.status === "In development";
   const workflow = productWorkflows[slug] ?? [];
+  const screens = productScreens[slug] ?? [];
 
   return <PageShell>
-    <section className="page-hero split-hero product-page-hero"><div><p className="eyebrow">{product.status} · Product {product.number}</p><h1>{product.name}</h1><p className="lead">{product.description}</p><div className="hero-actions"><Link className="button button-primary" href="/trial">{planned ? "Register interest" : "Request access"} <span>↗</span></Link><Link className="button button-quiet" href="/contact">Talk to FAST</Link></div></div><div className={`product-demo product-demo-${slug}`}><div className="demo-bar"><span/><span/><span/><small>{product.name}</small></div><div className="demo-body"><div className="demo-sidebar"><b>FAST</b><i className="active"/><i/><i/><i/></div><div className="demo-workspace"><div className="demo-title"><small>{product.label} workspace</small><strong>{product.name}</strong></div><div className="demo-stat-row"><span><small>Workspace</small><b>Ready</b></span><span><small>Access</small><b>Secure</b></span><span><small>Status</small><b>{planned ? "Roadmap" : "Live"}</b></span></div><div className="demo-chart"><i/><i/><i/><i/><i/><i/></div><div className="demo-list"><span/><span/><span/></div></div></div></div></section>
+    <section className={`page-hero split-hero product-page-hero ${screens.length ? "product-page-hero-real" : ""}`}>
+      <div><p className="eyebrow">{product.status} · Product {product.number}</p><h1>{product.name}</h1><p className="lead">{product.description}</p><div className="hero-actions"><Link className="button button-primary" href="/trial">{planned ? "Register interest" : "Request access"} <span>↗</span></Link><Link className="button button-quiet" href="/contact">Talk to FAST</Link></div></div>
+      {screens.length ? <ProductScreenshot {...screens[0]} caption={screens[0].text} priority className="product-hero-screenshot"/> : <div className={`product-demo product-demo-${slug}`}><div className="demo-bar"><span/><span/><span/><small>{product.name}</small></div><div className="demo-body"><div className="demo-sidebar"><b>FAST</b><i className="active"/><i/><i/><i/></div><div className="demo-workspace"><div className="demo-title"><small>{product.label} workspace</small><strong>{product.name}</strong></div><div className="demo-stat-row"><span><small>Workspace</small><b>Ready</b></span><span><small>Access</small><b>Secure</b></span><span><small>Status</small><b>{planned ? "Roadmap" : "Live"}</b></span></div><div className="demo-chart"><i/><i/><i/><i/><i/><i/></div><div className="demo-list"><span/><span/><span/></div></div></div></div>}
+    </section>
     {planned && <section className="notice-band"><strong>Product roadmap</strong><p>{product.name} is in active development. The scope shown here describes the intended product direction and may evolve before release.</p></section>}
+    {screens.length > 1 && <section className="content-section product-tour"><div className="section-heading compact"><p className="eyebrow">Inside {product.name}</p><h2>Real software. Built around the working environment.</h2><p>Explore the current private-beta interface. Select any image to view it in full.</p></div><div className="product-tour-list">{screens.slice(1).map((screen, index) => <article className="product-tour-item" key={screen.src}><div className="product-tour-copy"><span>{String(index + 1).padStart(2, "0")}</span><h3>{screen.title}</h3><p>{screen.text}</p></div><ProductScreenshot {...screen}/></article>)}</div></section>}
     <section className="content-section"><div className="section-heading compact"><p className="eyebrow">Core capabilities</p><h2>{planned ? "The planned foundation for" : "Everything needed to"} {product.label.toLowerCase()} with confidence.</h2></div><div className="feature-cards">{product.features.map((feature,index)=><article key={feature}><span>{String(index+1).padStart(2,"0")}</span><h3>{feature}</h3><p>Designed within one connected FAST workflow, with consistent organisation context, access control and a clear user experience.</p></article>)}</div></section>
     <section className="content-section product-workflow"><div className="section-heading compact"><p className="eyebrow">How it fits</p><h2>A clear workflow from first action to useful outcome.</h2><p>{product.name} is structured around the way analysts, coaches and administrators actually work—not around isolated features.</p></div><div className="workflow-steps">{workflow.map(([title,text],index)=><article key={title}><span>{String(index+1).padStart(2,"0")}</span><div><h3>{title}</h3><p>{text}</p></div></article>)}</div></section>
     <section className="workflow-band"><p className="eyebrow">Connected by design</p><h2>{product.name} belongs to one shared platform—not another isolated tool.</h2><Link href="/platform">Explore the full platform <span>→</span></Link></section><CTA />
