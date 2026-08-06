@@ -1,6 +1,12 @@
+import type { Metadata } from "next";
+import Link from "next/link";
 import { CTA } from "../components/CTA";
 import { PageShell } from "../components/PageShell";
 import { sports } from "../components/site-data";
 
-const descriptions: Record<string,string> = {Football:"Live coding, formations, substitutions, player context and review workflows built around the rhythm of football.",Rugby:"Match events, scoring, player status and coding structures suited to rugby analysis.",Cricket:"Formats, innings, overs, batting order, bowling changes and detailed scoring context.",Basketball:"Fast event coding, player context and possession-based review for a high-tempo game.",Baseball:"Diamond-based structure, batting and fielding roles, scoring events and situational review.",Volleyball:"Rally-based coding and repeatable review workflows for team and player performance.",Tennis:"Singles and doubles structures with player-specific event and match context.","Field Hockey":"Team structures, cards, match actions and video review adapted for field hockey.","Ice Hockey":"A fast review workflow for shifts, key events, player context and match clips.",Netball:"Position-aware team structure and coding designed around netball's match flow."};
-export default function Sports(){return <PageShell><section className="page-hero"><p className="eyebrow">Multi-sport platform</p><h1>Built for your sport.<br/><span>Connected by FAST.</span></h1><p className="lead">Every supported sport has its own match logic while keeping the same familiar analysis, review and delivery workflow.</p></section><section className="content-section"><div className="sport-cards">{sports.map((sport,index)=><article key={sport}><span>{String(index+1).padStart(2,"0")}</span><h2>{sport}</h2><p>{descriptions[sport]}</p><small>FAST Analysis · FAST Viewer · FAST Cloud</small></article>)}</div></section><CTA title="Bring your sport into one connected workflow." /></PageShell>}
+export const metadata: Metadata = {
+  title: "Sports",
+  description: "Explore the sport-specific FAST Analysis, FAST Viewer and FAST Cloud workflows available across ten sports.",
+};
+
+export default function Sports(){return <PageShell><section className="page-hero"><p className="eyebrow">Multi-sport platform</p><h1>Built for your sport.<br/><span>Connected by FAST.</span></h1><p className="lead">Every supported sport has its own match logic while keeping the same familiar analysis, review and delivery workflow.</p></section><section className="content-section"><div className="sport-cards">{sports.map((sport,index)=><Link className="sport-card-link" href={`/sports/${sport.slug}`} key={sport.slug}><article><span>{String(index+1).padStart(2,"0")}</span><h2>{sport.name}</h2><p>{sport.description}</p><small>Explore {sport.name} workflows <b>→</b></small></article></Link>)}</div></section><CTA title="Bring your sport into one connected workflow." /></PageShell>}
