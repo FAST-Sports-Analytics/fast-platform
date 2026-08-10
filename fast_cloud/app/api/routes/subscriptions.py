@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_current_user
 from app.db.session import get_db
 from app.models import AuditLog, Organisation, OrganisationSubscription, SubscriptionPlan, User
+from app.core.seats import allocated_user_count
 
 router = APIRouter(prefix="/subscriptions", tags=["subscriptions"])
 
@@ -148,13 +149,20 @@ def assign_plan(payload: AssignmentRequest, user: User = Depends(get_current_use
     if not item:
         item = OrganisationSubscription(organisation_id=organisation.id)
         db.add(item)
+    new_seat_limit = int(payload.seat_override or plan.included_seats or 1)
+    allocated_seats = allocated_user_count(db, organisation.id)
+    if new_seat_limit < allocated_seats:
+        raise HTTPException(status_code=409, detail=f"Cannot assign a plan with {new_seat_limit} seats while {allocated_seats} user seats are allocated")
+    previous_limit = int(organisation.max_seats or 1)
     item.plan_id = plan.id
     item.status = payload.status if payload.status in {"trial", "active", "past_due", "grace_period", "cancelled", "expired"} else "active"
     item.billing_interval = payload.billing_interval if payload.billing_interval in {"monthly", "annual", "manual"} else "monthly"
     item.seat_override = payload.seat_override
     item.updated_at = datetime.now(timezone.utc)
     organisation.subscription_tier = plan.name
-    organisation.max_seats = payload.seat_override or plan.included_seats
-    db.add(AuditLog(admin_user_id=user.id, action="subscription_assigned", category="billing", target_type="organisation", target_id=organisation.id, target_label=organisation.name, details=f"Assigned {plan.name} ({item.billing_interval})."))
+    organisation.max_seats = new_seat_limit
+    db.add(AuditLog(admin_user_id=user.id, action="subscription_assigned", category="billing", target_type="organisation", target_id=organisation.id, target_label=organisation.name, details=f"Assigned {plan.name} ({item.billing_interval}); user seats {new_seat_limit}."))
+    if previous_limit != new_seat_limit:
+        db.add(AuditLog(admin_user_id=user.id, action="seat_limit_changed", category="billing", target_type="organisation", target_id=organisation.id, target_label=organisation.name, details=f"User seat limit changed from {previous_limit} to {new_seat_limit} by subscription assignment."))
     db.commit()
     return {"subscription": subscription_payload(db, organisation.id)}

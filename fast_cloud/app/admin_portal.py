@@ -30,6 +30,14 @@ from app.core.security import (
 )
 from app.db.session import engine, get_db
 from app.models import AuditLog, Club, ClubMember, CrashReport, DeviceActivation, DeviceAuditLog, Licence, LicenceTemplate, Organisation, Product, Release, RemoteCommand, Sport, User
+from app.core.seats import (
+    allocated_user_count,
+    club_allocated_user_count,
+    club_user_limit,
+    effective_user_seat_limit,
+    organisation_device_capacity,
+    user_would_consume_new_seat,
+)
 from app.releases import MAX_PACKAGE_BYTES as MAX_RELEASE_PACKAGE_BYTES, PACKAGES_DIR as RELEASE_PACKAGES_DIR, validate_release_package
 
 router = APIRouter(prefix="/admin", tags=["Admin Portal"])
@@ -674,13 +682,17 @@ def organisation_profile(
         active_devices = db.scalar(select(func.count(DeviceActivation.id)).where(
             DeviceActivation.licence_id.in_(licence_ids), DeviceActivation.active.is_(True)
         )) or 0
+    seat_limit = effective_user_seat_limit(db, organisation)
+    seats_used = allocated_user_count(db, organisation.id)
+    device_capacity = organisation_device_capacity(organisation)
     organisation_devices = db.scalars(select(DeviceActivation).join(Licence).join(Club).where(Club.organisation_id == organisation.id).order_by(DeviceActivation.last_validated_at.desc())).all()
     organisation_audit = db.scalars(select(AuditLog).where(AuditLog.admin_user_id.in_([u.id for u in organisation_users] or [-1])).order_by(AuditLog.created_at.desc()).limit(50)).all()
     licence_products = sorted({product for club in organisation.clubs for licence in club.licences if licence.status == "active" for product in json.loads(licence.products_json or "[]")})
     licence_sports = sorted({sport for club in organisation.clubs for licence in club.licences if licence.status == "active" for sport in json.loads(licence.sports_json or "[]")})
     return templates.TemplateResponse(request, "organisation_profile.html", {
         "admin": admin, "organisation": organisation, "unassigned_clubs": unassigned_clubs if admin.organisation_id is None else [],
-        "active_devices": active_devices, "seats_used": len(member_ids),
+        "active_devices": active_devices, "device_capacity": device_capacity,
+        "seats_used": seats_used, "seat_limit": seat_limit,
         "selected_sports": selected_sports, "all_sports": all_sports, "organisation_users": organisation_users,
         "organisation_devices": organisation_devices, "organisation_audit": organisation_audit,
         "licence_products": licence_products, "licence_sports": licence_sports,
@@ -704,9 +716,12 @@ def create_organisation_user(
         return RedirectResponse(f"/admin/organisations/{organisation_id}?error=Enter+valid+user+details+and+an+8-character+password.", status_code=303)
     if db.scalar(select(User).where(func.lower(User.email) == clean_email)):
         return RedirectResponse(f"/admin/organisations/{organisation_id}?error=That+email+already+has+an+account.", status_code=303)
-    seats = db.scalar(select(func.count(User.id)).where(User.organisation_id == organisation.id, User.status == "active")) or 0
-    if seats >= organisation.max_seats:
-        return RedirectResponse(f"/admin/organisations/{organisation_id}?error=This+organisation+has+used+all+available+seats.", status_code=303)
+    seats = allocated_user_count(db, organisation.id)
+    seat_limit = effective_user_seat_limit(db, organisation)
+    if seats >= seat_limit:
+        _record_audit(db, admin, "seat_allocation_blocked", "organisation_user", target_type="organisation", target_id=organisation.id, target_label=organisation.name, details=f"User creation blocked at {seats}/{seat_limit} allocated user seats.")
+        db.commit()
+        return RedirectResponse(f"/admin/organisations/{organisation_id}?error=All+user+seats+are+currently+allocated.", status_code=303)
     user = User(email=clean_email, full_name=full_name.strip() or None, password_hash=hash_password(password),
                 email_verified=True, status="active", role=role, is_admin=False, organisation_id=organisation.id,
                 products_json=json.dumps(products), sports_json=json.dumps(sports), must_change_password=True, invited_at=datetime.now(timezone.utc))
@@ -725,10 +740,18 @@ def update_organisation_user(organisation_id: int, user_id: int, request: Reques
     if not user or user.organisation_id != organisation_id:
         raise HTTPException(status_code=404, detail="Organisation user not found")
     valid_roles = {"administrator", "analyst", "coach", "scout"}
+    requested_status = status if status in {"active", "suspended"} else "active"
+    if requested_status == "active" and user.status != "active":
+        seat_limit = effective_user_seat_limit(db, db.get(Organisation, organisation_id))
+        seats = allocated_user_count(db, organisation_id)
+        if user_would_consume_new_seat(db, organisation_id, user.id) and seats >= seat_limit:
+            _record_audit(db, admin, "seat_allocation_blocked", "organisation_user", target_type="user", target_id=user.id, target_label=user.email, details=f"User reactivation blocked at {seats}/{seat_limit} allocated user seats.")
+            db.commit()
+            return RedirectResponse(f"/admin/organisations/{organisation_id}?error=All+user+seats+are+currently+allocated.", status_code=303)
     user.full_name = full_name.strip() or None
     user.role = role if role in valid_roles else "analyst"
     user.is_admin = False
-    user.status = status if status in {"active", "suspended"} else "active"
+    user.status = requested_status
     user.products_json = json.dumps(products)
     user.sports_json = json.dumps(sports)
     _record_audit(db, admin, "updated", "organisation_user", target_type="user", target_id=user.id, target_label=user.email, details=f"Role: {user.role}; status: {user.status}.")
@@ -778,7 +801,16 @@ def update_organisation(
     item.notes = notes.strip() or None
     item.subscription_tier = subscription_tier.strip() or "FAST Professional"
     item.sports_json = json.dumps(sorted(set(sports)))
-    item.max_seats = max(1, min(max_seats, 500))
+    requested_seats = max(1, min(max_seats, 500))
+    allocated_seats = allocated_user_count(db, organisation_id)
+    if requested_seats < allocated_seats:
+        return RedirectResponse(f"/admin/organisations/{organisation_id}?error=Seat+limit+cannot+be+lower+than+current+allocated+users.", status_code=303)
+    previous_seats = effective_user_seat_limit(db, item)
+    item.max_seats = requested_seats
+    from app.models import OrganisationSubscription
+    subscription = db.scalar(select(OrganisationSubscription).where(OrganisationSubscription.organisation_id == item.id))
+    if subscription:
+        subscription.seat_override = requested_seats
     item.logo_url = logo_url.strip() or None
     if expires_at.strip():
         try:
@@ -789,6 +821,8 @@ def update_organisation(
         item.expires_at = None
     item.status = status if status in {"active", "suspended", "archived"} else "active"
     _record_audit(db, admin, "updated", "organisation", target_type="organisation", target_id=item.id, target_label=item.name, details=f"Organisation details updated. Status: {item.status}.")
+    if previous_seats != item.max_seats:
+        _record_audit(db, admin, "seat_limit_changed", "organisation", target_type="organisation", target_id=item.id, target_label=item.name, details=f"User seat limit changed from {previous_seats} to {item.max_seats}.")
     db.commit()
     return RedirectResponse(f"/admin/organisations/{item.id}?message=Organisation+updated.", status_code=303)
 
@@ -870,10 +904,18 @@ def club_profile(
     organisations = db.scalars(select(Organisation).where(Organisation.status == "active").order_by(Organisation.name)).all()
     member_ids = {member.user_id for member in club.members}
     available_users = [user for user in users if user.id not in member_ids]
+    organisation = club.organisation
+    organisation_seats_used = allocated_user_count(db, organisation.id) if organisation else 0
+    organisation_seat_limit = effective_user_seat_limit(db, organisation) if organisation else None
+    current_club_users = club_allocated_user_count(club)
+    current_club_limit = club_user_limit(club)
     return templates.TemplateResponse(
         request,
         "club_profile.html",
-        {"admin": admin, "club": club, "organisations": organisations, "available_users": available_users, "message": message, "error": error},
+        {"admin": admin, "club": club, "organisations": organisations, "available_users": available_users,
+         "club_users_used": current_club_users, "club_user_limit": current_club_limit,
+         "organisation_seats_used": organisation_seats_used, "organisation_seat_limit": organisation_seat_limit,
+         "message": message, "error": error},
     )
 
 
@@ -922,6 +964,21 @@ def add_club_member(
         raise HTTPException(status_code=404, detail="Club or user not found")
     if any(member.user_id == user_id for member in club.members):
         return RedirectResponse(f"/admin/clubs/{club_id}?error=User+is+already+a+member.", status_code=303)
+    club_limit = club_user_limit(club)
+    club_used = club_allocated_user_count(club)
+    if club_limit is not None and club_used >= club_limit:
+        _record_audit(db, require_portal_admin(request, db), "seat_allocation_blocked", "club", target_type="club", target_id=club.id, target_label=club.name, details=f"Club member allocation blocked at {club_used}/{club_limit} licence user seats.")
+        db.commit()
+        return RedirectResponse(f"/admin/clubs/{club_id}?error=This+club+has+used+all+licence+user+seats.", status_code=303)
+    if club.organisation_id is not None:
+        organisation = db.get(Organisation, club.organisation_id)
+        if organisation and user_would_consume_new_seat(db, organisation.id, user.id):
+            org_used = allocated_user_count(db, organisation.id)
+            org_limit = effective_user_seat_limit(db, organisation)
+            if org_used >= org_limit:
+                _record_audit(db, require_portal_admin(request, db), "seat_allocation_blocked", "club", target_type="club", target_id=club.id, target_label=club.name, details=f"Club member allocation blocked because organisation user seats are full at {org_used}/{org_limit}.")
+                db.commit()
+                return RedirectResponse(f"/admin/clubs/{club_id}?error=The+organisation+has+used+all+available+user+seats.", status_code=303)
     valid_role = role if role in {"analyst", "coach"} else "coach"
     db.add(ClubMember(club_id=club_id, user_id=user_id, role=valid_role))
     db.commit()
@@ -2331,10 +2388,20 @@ def assign_subscription_plan(request: Request, organisation_id: int = Form(...),
     item = db.scalar(select(OrganisationSubscription).where(OrganisationSubscription.organisation_id == organisation.id))
     if not item:
         item = OrganisationSubscription(organisation_id=organisation.id); db.add(item)
+    requested_override = int(seat_override) if seat_override.strip().isdigit() and int(seat_override) > 0 else None
+    new_seat_limit = int(requested_override or plan.included_seats or 1)
+    allocated_seats = allocated_user_count(db, organisation.id)
+    if new_seat_limit < allocated_seats:
+        _record_audit(db, admin, action="seat_allocation_blocked", category="billing", target_type="organisation", target_id=organisation.id, target_label=organisation.name, details=f"Subscription assignment blocked: requested {new_seat_limit} user seats while {allocated_seats} are allocated.")
+        db.commit()
+        return RedirectResponse("/admin/subscriptions?error=The+selected+plan+does+not+have+enough+user+seats+for+this+organisation.", status_code=303)
+    previous_limit = effective_user_seat_limit(db, organisation)
     item.plan_id = plan.id; item.status = status if status in {"trial","active","past_due","grace_period","cancelled","expired"} else "active"
     item.billing_interval = billing_interval if billing_interval in {"monthly","annual","manual"} else "monthly"
-    item.seat_override = int(seat_override) if seat_override.strip().isdigit() and int(seat_override) > 0 else None
-    organisation.subscription_tier = plan.name; organisation.max_seats = item.seat_override or plan.included_seats
-    _record_audit(db, admin, action="subscription_assigned", category="billing", target_type="organisation", target_id=organisation.id, target_label=organisation.name, details=f"Assigned {plan.name} ({item.billing_interval}).")
+    item.seat_override = requested_override
+    organisation.subscription_tier = plan.name; organisation.max_seats = new_seat_limit
+    _record_audit(db, admin, action="subscription_assigned", category="billing", target_type="organisation", target_id=organisation.id, target_label=organisation.name, details=f"Assigned {plan.name} ({item.billing_interval}); user seats {new_seat_limit}.")
+    if previous_limit != new_seat_limit:
+        _record_audit(db, admin, action="seat_limit_changed", category="billing", target_type="organisation", target_id=organisation.id, target_label=organisation.name, details=f"User seat limit changed from {previous_limit} to {new_seat_limit} by subscription assignment.")
     db.commit()
     return RedirectResponse("/admin/subscriptions?message=Subscription+assigned.", status_code=303)

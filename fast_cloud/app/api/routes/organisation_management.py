@@ -18,6 +18,7 @@ from app.core.rate_limit import RateLimit, client_address, limiter
 from app.db.session import get_db
 from app.models import AuditLog, Club, DeviceActivation, DeviceAuditLog, Licence, Organisation, User
 from app.api.routes.subscriptions import subscription_payload
+from app.core.seats import allocated_user_count, effective_user_seat_limit, user_would_consume_new_seat
 
 router = APIRouter(prefix="/organisation-management", tags=["organisation-management"])
 settings = get_settings()
@@ -204,12 +205,12 @@ def _overview(db: Session, organisation_id: int) -> dict:
         and "heartbeat" not in str(item.action or "").lower()
     ][:100]
     active_users = sum(1 for item in users if item.status == "active")
-    allocated_users = sum(1 for item in users if item.status in {"active", "invited"})
+    allocated_users = allocated_user_count(db, organisation_id)
     active_devices = sum(1 for item in devices if item.active)
     subscription = subscription_payload(db, organisation_id)
     plan = subscription.get("plan") or {}
     max_devices = int(plan.get("max_devices") or 0)
-    seat_limit = int(subscription.get("seat_override") or plan.get("included_seats") or organisation.max_seats or 0)
+    seat_limit = effective_user_seat_limit(db, organisation)
     subscription_status = str(subscription.get("status") or "unconfigured").lower()
     health_checks = [
         {"key": "subscription", "ok": subscription_status in {"active", "trial"}, "label": "Subscription", "detail": subscription.get("display_status") or "Plan not configured"},
@@ -224,7 +225,7 @@ def _overview(db: Session, organisation_id: int) -> dict:
             "name": organisation.name,
             "tier": organisation.subscription_tier,
             "status": organisation.status,
-            "max_seats": organisation.max_seats,
+            "max_seats": seat_limit,
             "seats_used": allocated_users,
             "active_users": active_users,
             "active_devices": active_devices,
@@ -303,9 +304,12 @@ def create_user(payload: CreateUserRequest, user: User = Depends(get_current_use
         and str(existing_user.status or "").lower() == "removed"
     ):
         raise HTTPException(status_code=409, detail="That email already has an account")
-    used = db.scalar(select(func.count(User.id)).where(User.organisation_id == organisation_id, User.status.in_(["active", "invited"]))) or 0
-    if used >= organisation.max_seats:
-        raise HTTPException(status_code=409, detail="All organisation seats are currently allocated")
+    used = allocated_user_count(db, organisation_id)
+    seat_limit = effective_user_seat_limit(db, organisation)
+    if used >= seat_limit:
+        _audit(db, user, "seat_allocation_blocked", "organisation", organisation.id, organisation.name, f"User creation blocked at {used}/{seat_limit} allocated user seats.")
+        db.commit()
+        raise HTTPException(status_code=409, detail="All organisation user seats are currently allocated")
     allowed_products, allowed_sports = _entitlements(organisation)
     temporary_password = payload.temporary_password.strip()
     if temporary_password and len(temporary_password) < 10:
@@ -378,6 +382,13 @@ def update_user(user_id: int, payload: UpdateUserRequest, user: User = Depends(g
         raise HTTPException(status_code=409, detail="You cannot remove your own organisation administrator access")
     organisation = db.get(Organisation, organisation_id)
     assert organisation is not None
+    if status in {"active", "invited"} and str(target.status or "").lower() not in {"active", "invited"}:
+        used = allocated_user_count(db, organisation_id)
+        seat_limit = effective_user_seat_limit(db, organisation)
+        if user_would_consume_new_seat(db, organisation_id, target.id) and used >= seat_limit:
+            _audit(db, user, "seat_allocation_blocked", "organisation_user", target.id, target.email, f"User reactivation blocked at {used}/{seat_limit} allocated user seats.")
+            db.commit()
+            raise HTTPException(status_code=409, detail="All organisation user seats are currently allocated")
     allowed_products, allowed_sports = _entitlements(organisation)
     target.full_name = payload.full_name.strip() or None
     target.role = role
