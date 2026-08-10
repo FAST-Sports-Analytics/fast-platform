@@ -2067,9 +2067,21 @@ def update_device_status(
         if active_count >= device.licence.max_devices:
             return RedirectResponse("/admin/devices?error=The+licence+device+limit+has+already+been+reached.", status_code=303)
     device.active = make_active
-    _record_device_action(db, admin, device, "reactivated" if make_active else "removed", "Device access restored." if make_active else "Device deactivated and no longer counts against the licence.")
+    _record_device_action(
+        db,
+        admin,
+        device,
+        "reactivated" if make_active else "deactivated",
+        "Device access restored and a licence seat allocated."
+        if make_active
+        else "Device access revoked and its licence seat reclaimed. Administrator reactivation is required before this device can use FAST again.",
+    )
     db.commit()
-    return RedirectResponse("/admin/devices?message=Device+status+updated.", status_code=303)
+    return RedirectResponse(
+        "/admin/devices?message=Device+reactivated." if make_active
+        else "/admin/devices?message=Device+deactivated.",
+        status_code=303,
+    )
 
 
 

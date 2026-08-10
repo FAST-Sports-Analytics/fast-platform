@@ -36,8 +36,8 @@
     <td><div class="device-actions">
       <form method="post" action="/admin/devices/{{ device.id }}/rename"><input name="device_name" value="{{ device.device_name or '' }}" maxlength="160" placeholder="e.g. Bench Laptop" required><button type="submit">Rename</button></form>
       {% if device.active %}
-      <form method="post" action="/admin/devices/{{ device.id }}/force-signout" onsubmit="return confirm('Force this device to sign out? Access will be revoked on its next heartbeat.');"><button class="danger" type="submit">Force sign out</button></form>
-      <form method="post" action="/admin/devices/{{ device.id }}/status" onsubmit="return confirm('Remove this device from the active seat allocation? It will need to be activated again.');"><input type="hidden" name="active" value="false"><button type="submit">Remove</button></form>
+      <form method="post" action="/admin/devices/{{ device.id }}/force-signout" onsubmit="return confirm('Force this device to sign out immediately? This also revokes its current device entitlement. Use Reactivate afterwards if access should be restored.');"><button type="submit">Force sign out</button></form>
+      <form method="post" action="/admin/devices/{{ device.id }}/status" onsubmit="return confirm('Deactivate this device? Its licence seat will be reclaimed and the device will remain blocked until an administrator reactivates it.');"><input type="hidden" name="active" value="false"><button class="danger" type="submit">Deactivate</button></form>
       {% else %}
       <form method="post" action="/admin/devices/{{ device.id }}/status" onsubmit="return confirm('Reactivate this device and allocate a licence seat?');"><input type="hidden" name="active" value="true"><button type="submit">Reactivate</button></form>
       {% endif %}
