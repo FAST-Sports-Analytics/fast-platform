@@ -135,6 +135,26 @@ def _current_licence(db: Session, user: User) -> Licence | None:
     )
 
 
+
+def _access_role_for_licence(db: Session, user: User, licence: Licence) -> str:
+    """Resolve the role that governs access to the selected licence.
+
+    A club membership role is authoritative when it is a product-bearing role.
+    Owner/member are relationship labels, so they fall back to the organisation
+    user's role. Platform administrators retain administrator access.
+    """
+    if bool(user.is_admin and user.organisation_id is None):
+        return "administrator"
+    if getattr(licence, "owner_type", "individual") == "club" and getattr(licence, "club_id", None):
+        membership = db.scalar(select(ClubMember).where(
+            ClubMember.club_id == licence.club_id,
+            ClubMember.user_id == user.id,
+        ))
+        membership_role = str(getattr(membership, "role", "") or "").strip().lower()
+        if membership_role in {"administrator", "analyst", "coach", "scout"}:
+            return membership_role
+    return str(user.role or "analyst").strip().lower()
+
 def licence_payload(db: Session, user: User) -> dict | None:
     licence = _current_licence(db, user)
     if not licence:
@@ -146,9 +166,10 @@ def licence_payload(db: Session, user: User) -> dict | None:
     if not licence_is_current(licence.status, licence.expires_at):
         return None
     platform_admin = bool(user.is_admin and user.organisation_id is None)
+    access_role = _access_role_for_licence(db, user, licence)
     products = filter_products(
         licence.products_json,
-        role=user.role,
+        role=access_role,
         is_platform_admin=platform_admin,
         assigned_products=user.products_json,
     )
@@ -168,6 +189,7 @@ def licence_payload(db: Session, user: User) -> dict | None:
         "owner_user_id": licence.user_id,
         "owner_club_id": licence.club_id,
         "max_users": licence.max_users,
+        "access_role": access_role,
         "organisation": organisation_payload(licence),
         "subscription": subscription_payload(db, user.organisation_id) if user.organisation_id else None,
     }

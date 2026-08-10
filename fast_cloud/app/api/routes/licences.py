@@ -45,6 +45,20 @@ def current_licence_for_user(db: Session, user: User) -> Licence | None:
     )
 
 
+
+def access_role_for_licence(db: Session, user: User, licence: Licence) -> str:
+    if bool(user.is_admin and user.organisation_id is None):
+        return "administrator"
+    if getattr(licence, "owner_type", "individual") == "club" and getattr(licence, "club_id", None):
+        membership = db.scalar(select(ClubMember).where(
+            ClubMember.club_id == licence.club_id,
+            ClubMember.user_id == user.id,
+        ))
+        membership_role = str(getattr(membership, "role", "") or "").strip().lower()
+        if membership_role in {"administrator", "analyst", "coach", "scout"}:
+            return membership_role
+    return str(user.role or "analyst").strip().lower()
+
 def ensure_current(licence: Licence) -> None:
     now = datetime.now(timezone.utc)
     expiry = licence.expires_at
@@ -239,8 +253,10 @@ def entitlements(user: User = Depends(get_current_user), db: Session = Depends(g
     )) or 0
     payload = serialise(licence, active_count)
     platform_admin = bool(user.is_admin and user.organisation_id is None)
+    access_role = access_role_for_licence(db, user, licence)
+    payload["access_role"] = access_role
     payload["products"] = filter_products(
-        licence.products_json, role=user.role, is_platform_admin=platform_admin, assigned_products=user.products_json
+        licence.products_json, role=access_role, is_platform_admin=platform_admin, assigned_products=user.products_json
     )
     payload["sports"] = filter_sports(licence.sports_json, assigned_sports=user.sports_json)
     return {
