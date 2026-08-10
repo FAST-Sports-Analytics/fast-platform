@@ -119,6 +119,29 @@ def serialise(licence: Licence, active_devices: int | None = None) -> dict:
     }
 
 
+def serialise_for_user(db: Session, user: User, licence: Licence, active_devices: int | None = None) -> dict:
+    """Serialise an effective licence using the same role/sport policy as /entitlements.
+
+    This keeps legacy /current and /validate callers from receiving the raw
+    licence product list and accidentally bypassing club-role restrictions.
+    """
+    payload = serialise(licence, active_devices)
+    platform_admin = bool(user.is_admin and user.organisation_id is None)
+    access_role = access_role_for_licence(db, user, licence)
+    payload["access_role"] = access_role
+    payload["products"] = filter_products(
+        licence.products_json,
+        role=access_role,
+        is_platform_admin=platform_admin,
+        assigned_products=user.products_json,
+    )
+    payload["sports"] = filter_sports(
+        licence.sports_json,
+        assigned_sports=user.sports_json,
+    )
+    return payload
+
+
 @admin_router.post("")
 def create_licence(
     payload: CreateLicenceRequest,
@@ -232,7 +255,10 @@ def current(user: User = Depends(get_current_user), db: Session = Depends(get_db
         DeviceActivation.licence_id == licence.id,
         DeviceActivation.active.is_(True),
     )) or 0
-    return {"licence": serialise(licence, active_count)}
+    return {
+        "licence": serialise_for_user(db, user, licence, active_count),
+        "subscription_access": subscription_access.payload(),
+    }
 
 
 @router.post("/validate")
@@ -261,7 +287,11 @@ def validate(
         DeviceActivation.licence_id == licence.id,
         DeviceActivation.active.is_(True),
     )) or 0
-    return {"valid": True, "licence": serialise(licence, active_count)}
+    return {
+        "valid": True,
+        "licence": serialise_for_user(db, user, licence, active_count),
+        "subscription_access": subscription_access.payload(),
+    }
 
 
 @router.get("/entitlements")
@@ -278,14 +308,7 @@ def entitlements(user: User = Depends(get_current_user), db: Session = Depends(g
     active_count = db.scalar(select(func.count(DeviceActivation.id)).where(
         DeviceActivation.licence_id == licence.id, DeviceActivation.active.is_(True)
     )) or 0
-    payload = serialise(licence, active_count)
-    platform_admin = bool(user.is_admin and user.organisation_id is None)
-    access_role = access_role_for_licence(db, user, licence)
-    payload["access_role"] = access_role
-    payload["products"] = filter_products(
-        licence.products_json, role=access_role, is_platform_admin=platform_admin, assigned_products=user.products_json
-    )
-    payload["sports"] = filter_sports(licence.sports_json, assigned_sports=user.sports_json)
+    payload = serialise_for_user(db, user, licence, active_count)
     return {
         "licensed": True,
         "products": payload["products"],
@@ -302,9 +325,9 @@ def deactivate_device(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    licence = db.scalar(select(Licence).where(Licence.user_id == user.id))
+    licence = current_licence_for_user(db, user)
     if not licence:
-        raise HTTPException(status_code=404, detail="No licence assigned")
+        raise HTTPException(status_code=404, detail="No active licence")
     activation = db.scalar(select(DeviceActivation).where(
         DeviceActivation.licence_id == licence.id,
         DeviceActivation.device_id == payload.device_id,
@@ -313,5 +336,11 @@ def deactivate_device(
     if not activation:
         raise HTTPException(status_code=404, detail="Active device was not found")
     activation.active = False
+    db.add(DeviceAuditLog(
+        device_activation_id=activation.id,
+        admin_user_id=user.id,
+        action="deactivated",
+        details=f"{activation.device_name or activation.device_id} deactivated by the signed-in user.",
+    ))
     db.commit()
     return {"message": "Device deactivated"}
