@@ -9,7 +9,7 @@ from app.api.deps import get_current_user, require_admin
 from app.core.security import generate_licence_code, hash_licence_code, normalise_licence_code
 from app.core.entitlements import filter_products, filter_sports, licence_is_current
 from app.db.session import get_db
-from app.models import Club, ClubMember, DeviceActivation, Licence, User
+from app.models import Club, ClubMember, DeviceActivation, DeviceAuditLog, Licence, User
 from app.schemas.licence import (
     ActivateLicenceRequest,
     CreateLicenceRequest,
@@ -178,18 +178,32 @@ def activate(
             DeviceActivation.active.is_(True),
         )
     ) or 0
+    if existing and not existing.active:
+        # A deactivated device is an explicit administrative decision.  Re-entering
+        # the licence code must not let the same machine consume the reclaimed slot.
+        raise HTTPException(
+            status_code=409,
+            detail="This device has been deactivated. Ask your administrator to reactivate it before using FAST applications.",
+        )
     if not existing and active_count >= licence.max_devices:
         raise HTTPException(status_code=409, detail="Device activation limit reached")
 
     if existing:
-        existing.active = True
         existing.device_name = payload.device_name or existing.device_name
         existing.last_validated_at = datetime.now(timezone.utc)
     else:
-        db.add(DeviceActivation(
+        activation = DeviceActivation(
             licence_id=licence.id,
             device_id=payload.device_id,
             device_name=payload.device_name,
+        )
+        db.add(activation)
+        db.flush()
+        db.add(DeviceAuditLog(
+            device_activation_id=activation.id,
+            admin_user_id=user.id,
+            action="activated",
+            details=f"{payload.device_name or payload.device_id} activated from FAST Launcher.",
         ))
         active_count += 1
 

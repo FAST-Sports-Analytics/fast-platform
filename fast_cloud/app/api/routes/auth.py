@@ -420,17 +420,21 @@ def session_status(
     device_message = "No active licence is assigned to this account."
 
     if licence_data:
+        # Look up the device regardless of active state.  An inactive row means an
+        # administrator deliberately reclaimed this allocation, so session refresh
+        # must never silently reactivate it.
         activation = db.scalar(select(DeviceActivation).where(
             DeviceActivation.licence_id == licence_data["id"],
             DeviceActivation.device_id == payload.device_id,
-            DeviceActivation.active.is_(True),
         ))
-        if activation:
+        if activation and activation.active:
             activation.device_name = payload.device_name or activation.device_name
             activation.last_validated_at = datetime.now(timezone.utc)
             db.commit()
             device_activated = True
             device_message = "This device is activated."
+        elif activation and not activation.active:
+            device_message = "This device has been deactivated. Ask your administrator to reactivate it before using FAST applications."
         elif user.organisation_id is not None and licence_data.get("owner_type") == "club":
             active_count = db.scalar(select(func.count(DeviceActivation.id)).where(
                 DeviceActivation.licence_id == licence_data["id"],
