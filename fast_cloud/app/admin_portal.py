@@ -32,6 +32,7 @@ from app.db.session import engine, get_db
 from app.models import AuditLog, Club, ClubMember, CrashReport, DeviceActivation, DeviceAuditLog, Licence, LicenceTemplate, Organisation, Product, Release, RemoteCommand, Sport, User
 from app.core.seats import (
     allocated_user_count,
+    allocated_user_ids,
     club_allocated_user_count,
     club_user_limit,
     effective_user_seat_limit,
@@ -683,7 +684,28 @@ def organisation_profile(
             DeviceActivation.licence_id.in_(licence_ids), DeviceActivation.active.is_(True)
         )) or 0
     seat_limit = effective_user_seat_limit(db, organisation)
-    seats_used = allocated_user_count(db, organisation.id)
+    allocated_ids = allocated_user_ids(db, organisation.id)
+    seats_used = len(allocated_ids)
+    licensed_users = []
+    if allocated_ids:
+        allocated_records = db.scalars(
+            select(User).where(User.id.in_(allocated_ids)).order_by(User.full_name, User.email)
+        ).all()
+        membership_rows = db.scalars(
+            select(ClubMember)
+            .join(Club, Club.id == ClubMember.club_id)
+            .where(Club.organisation_id == organisation.id, ClubMember.user_id.in_(allocated_ids))
+            .order_by(Club.name)
+        ).all()
+        memberships_by_user: dict[int, list[ClubMember]] = {}
+        for membership in membership_rows:
+            memberships_by_user.setdefault(membership.user_id, []).append(membership)
+        for user in allocated_records:
+            licensed_users.append({
+                "user": user,
+                "direct": user.organisation_id == organisation.id,
+                "memberships": memberships_by_user.get(user.id, []),
+            })
     device_capacity = organisation_device_capacity(organisation)
     organisation_devices = db.scalars(select(DeviceActivation).join(Licence).join(Club).where(Club.organisation_id == organisation.id).order_by(DeviceActivation.last_validated_at.desc())).all()
     organisation_audit = db.scalars(select(AuditLog).where(AuditLog.admin_user_id.in_([u.id for u in organisation_users] or [-1])).order_by(AuditLog.created_at.desc()).limit(50)).all()
@@ -694,6 +716,7 @@ def organisation_profile(
         "active_devices": active_devices, "device_capacity": device_capacity,
         "seats_used": seats_used, "seat_limit": seat_limit,
         "selected_sports": selected_sports, "all_sports": all_sports, "organisation_users": organisation_users,
+        "licensed_users": licensed_users,
         "organisation_devices": organisation_devices, "organisation_audit": organisation_audit,
         "licence_products": licence_products, "licence_sports": licence_sports,
         "message": message, "error": error,
