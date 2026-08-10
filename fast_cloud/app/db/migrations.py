@@ -138,4 +138,4 @@ def migrate_schema(engine: Engine) -> None:
                 connection.execute(text(f"ALTER TABLE licences ADD COLUMN {name} {definition}"))
         connection.execute(text("UPDATE licences SET owner_type='individual' WHERE owner_type IS NULL OR owner_type=''"))
         connection.execute(text("UPDATE licences SET max_users=1 WHERE max_users IS NULL"))
-        connection.execute(text("UPDATE licences SET renewable=1 WHERE renewable IS NULL"))
+        connection.execute(text("UPDATE licences SET renewable=TRUE WHERE renewable IS NULL"))
