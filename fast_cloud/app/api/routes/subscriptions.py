@@ -136,6 +136,7 @@ class AssignmentRequest(BaseModel):
     organisation_id: int
     plan_id: int
     status: str = "active"
+    trial_ends_at: datetime | None = None
     current_period_ends_at: datetime | None = None
     grace_ends_at: datetime | None = None
     cancel_at_period_end: bool = False
@@ -173,17 +174,37 @@ def assign_plan(payload: AssignmentRequest, user: User = Depends(get_current_use
     if new_seat_limit < allocated_seats:
         raise HTTPException(status_code=409, detail=f"Cannot assign a plan with {new_seat_limit} seats while {allocated_seats} user seats are allocated")
     previous_limit = int(organisation.max_seats or 1)
+    previous_status = str(item.status or "unconfigured")
+    previous_trial_end = item.trial_ends_at
+    previous_period_end = item.current_period_ends_at
+    previous_grace_end = item.grace_ends_at
+    previous_cancel_at_period_end = bool(item.cancel_at_period_end)
     item.plan_id = plan.id
     item.status = payload.status if payload.status in {"trial", "active", "past_due", "grace_period", "cancelled", "suspended", "expired"} else "active"
+    item.trial_ends_at = payload.trial_ends_at
     item.current_period_ends_at = payload.current_period_ends_at
     item.grace_ends_at = payload.grace_ends_at
     item.cancel_at_period_end = bool(payload.cancel_at_period_end)
+    if item.status == "trial" and item.trial_ends_at is None:
+        raise HTTPException(status_code=422, detail="Trial subscriptions require a trial end date")
+    if item.status in {"past_due", "grace_period"} and item.grace_ends_at is None and item.current_period_ends_at is None:
+        raise HTTPException(status_code=422, detail="Past-due/grace subscriptions require a grace or period end date")
+    if (item.status == "cancelled" or item.cancel_at_period_end) and item.current_period_ends_at is None:
+        raise HTTPException(status_code=422, detail="Cancelled subscriptions require a current period end date")
     item.billing_interval = payload.billing_interval if payload.billing_interval in {"monthly", "annual", "manual"} else "monthly"
     item.seat_override = effective_override
     item.updated_at = datetime.now(timezone.utc)
     organisation.subscription_tier = plan.name
     organisation.max_seats = new_seat_limit
     db.add(AuditLog(admin_user_id=user.id, action="subscription_assigned", category="billing", target_type="organisation", target_id=organisation.id, target_label=organisation.name, details=f"Assigned {plan.name} ({item.billing_interval}); user seats {new_seat_limit}."))
+    if (previous_status != item.status or previous_trial_end != item.trial_ends_at or previous_period_end != item.current_period_ends_at or previous_grace_end != item.grace_ends_at or previous_cancel_at_period_end != bool(item.cancel_at_period_end)):
+        db.add(AuditLog(admin_user_id=user.id, action="subscription_lifecycle_changed", category="billing", target_type="organisation", target_id=organisation.id, target_label=organisation.name, details=(
+            f"Subscription lifecycle changed: status {previous_status} -> {item.status}; "
+            f"trial end {previous_trial_end or 'not set'} -> {item.trial_ends_at or 'not set'}; "
+            f"period end {previous_period_end or 'not set'} -> {item.current_period_ends_at or 'not set'}; "
+            f"grace end {previous_grace_end or 'not set'} -> {item.grace_ends_at or 'not set'}; "
+            f"cancel at period end {previous_cancel_at_period_end} -> {bool(item.cancel_at_period_end)}."
+        )))
     if previous_limit != new_seat_limit:
         db.add(AuditLog(admin_user_id=user.id, action="seat_limit_changed", category="billing", target_type="organisation", target_id=organisation.id, target_label=organisation.name, details=f"User seat limit changed from {previous_limit} to {new_seat_limit} by subscription assignment."))
     db.commit()
