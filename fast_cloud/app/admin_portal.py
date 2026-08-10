@@ -2419,9 +2419,13 @@ def assign_subscription_plan(request: Request, organisation_id: int = Form(...),
     # subscription (for example active -> suspended).  Re-applying the plan's
     # default here could otherwise turn a status-only update into an accidental
     # seat downgrade and block the update.
-    if same_plan and requested_override is None:
+    preserve_custom_capacity = requested_override is None and plan.name.strip().lower() == "custom"
+    if (same_plan and requested_override is None) or preserve_custom_capacity:
+        # Custom is an organisation-specific entitlement. Selecting it without a
+        # seat override must preserve the organisation's licensed capacity rather
+        # than applying the generic Custom plan template (normally 1 seat).
         new_seat_limit = int(effective_user_seat_limit(db, organisation))
-        effective_override = item.seat_override
+        effective_override = item.seat_override if same_plan else new_seat_limit
     else:
         new_seat_limit = int(requested_override or plan.included_seats or 1)
         effective_override = requested_override

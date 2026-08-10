@@ -159,9 +159,13 @@ def assign_plan(payload: AssignmentRequest, user: User = Depends(get_current_use
     # Preserve the current capacity when the existing subscription is being
     # edited without an explicit seat override.  This keeps status-only changes
     # (such as active -> suspended -> active) independent from seat validation.
-    if same_plan and payload.seat_override is None:
+    preserve_custom_capacity = payload.seat_override is None and plan.name.strip().lower() == "custom"
+    if (same_plan and payload.seat_override is None) or preserve_custom_capacity:
+        # Custom is an organisation-specific entitlement. Selecting it without a
+        # seat override must preserve the organisation's licensed capacity rather
+        # than applying the generic Custom plan template (normally 1 seat).
         new_seat_limit = int(organisation.max_seats or plan.included_seats or 1)
-        effective_override = item.seat_override
+        effective_override = item.seat_override if same_plan else new_seat_limit
     else:
         new_seat_limit = int(payload.seat_override or plan.included_seats or 1)
         effective_override = payload.seat_override
