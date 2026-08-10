@@ -928,15 +928,82 @@ def add_club_member(
     return RedirectResponse(f"/admin/clubs/{club_id}?message=Member+added.", status_code=303)
 
 
+@router.post("/clubs/{club_id}/members/{member_id}/role")
+def update_club_member_role(
+    club_id: int,
+    member_id: int,
+    request: Request,
+    role: str = Form(...),
+    db: Session = Depends(get_db),
+):
+    admin = require_portal_admin(request, db)
+    member = db.get(ClubMember, member_id)
+    if not member or member.club_id != club_id:
+        raise HTTPException(status_code=404, detail="Membership not found")
+
+    club = db.get(Club, club_id)
+    if not club:
+        raise HTTPException(status_code=404, detail="Club not found")
+
+    if member.role == "owner" or club.owner_user_id == member.user_id:
+        return RedirectResponse(
+            f"/admin/clubs/{club_id}?error=The+club+owner+role+is+managed+from+the+Primary+contact+field.",
+            status_code=303,
+        )
+
+    if role not in {"analyst", "coach"}:
+        return RedirectResponse(
+            f"/admin/clubs/{club_id}?error=Choose+either+Analyst+or+Coach.",
+            status_code=303,
+        )
+
+    if member.role == role:
+        return RedirectResponse(
+            f"/admin/clubs/{club_id}?message=Member+role+unchanged.",
+            status_code=303,
+        )
+
+    old_role = member.role
+    member.role = role
+    label = member.user.full_name or member.user.email
+    _record_audit(
+        db,
+        admin,
+        "updated",
+        "club",
+        target_type="club_member",
+        target_id=member.id,
+        target_label=label,
+        details=f"Club membership role changed from {old_role} to {role} for {club.name}.",
+    )
+    db.commit()
+    return RedirectResponse(
+        f"/admin/clubs/{club_id}?message=Member+role+updated.",
+        status_code=303,
+    )
+
+
 @router.post("/clubs/{club_id}/members/{member_id}/remove")
 def remove_club_member(club_id: int, member_id: int, request: Request, db: Session = Depends(get_db)):
-    require_portal_admin(request, db)
+    admin = require_portal_admin(request, db)
     member = db.get(ClubMember, member_id)
     if not member or member.club_id != club_id:
         raise HTTPException(status_code=404, detail="Membership not found")
     club = db.get(Club, club_id)
     if club and club.owner_user_id == member.user_id:
         return RedirectResponse(f"/admin/clubs/{club_id}?error=Assign+a+different+owner+before+removing+this+member.", status_code=303)
+    label = member.user.full_name or member.user.email
+    club_name = club.name if club else f"Club {club_id}"
+    _record_audit(
+        db,
+        admin,
+        "removed",
+        "club",
+        target_type="club_member",
+        target_id=member.id,
+        target_label=label,
+        details=f"Member removed from {club_name}.",
+    )
     db.delete(member)
     db.commit()
     return RedirectResponse(f"/admin/clubs/{club_id}?message=Member+removed.", status_code=303)
