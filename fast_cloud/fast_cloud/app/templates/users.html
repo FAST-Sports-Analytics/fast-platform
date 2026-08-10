@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}Users | FAST Cloud Admin{% endblock %}
+{% block content %}
+<div class="page-heading">
+  <div><h1>Users</h1><p>Manage customer accounts, verification, access, club membership and licence assignment.</p></div>
+  <div class="actions"><a class="button primary" href="/admin/users/new">Create user</a></div>
+</div>
+{% if message %}<div class="alert success">{{ message }}</div>{% endif %}
+{% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+<section class="stats user-stats">
+  <article><span>Total users</span><strong>{{ stats.total }}</strong></article>
+  <article><span>Active users</span><strong>{{ stats.active }}</strong></article>
+  <article><span>Verified emails</span><strong>{{ stats.verified }}</strong></article>
+  <article><span>FAST administrators</span><strong>{{ stats.admins }}</strong></article>
+</section>
+<section class="panel">
+  <form class="filter-bar" method="get" action="/admin/users">
+    <label class="search-field"><span>Search</span><input type="search" name="q" value="{{ filters.q }}" placeholder="Name or email"></label>
+    <label><span>Status</span><select name="status"><option value="all" {% if filters.status == 'all' %}selected{% endif %}>All statuses</option><option value="active" {% if filters.status == 'active' %}selected{% endif %}>Active</option><option value="suspended" {% if filters.status == 'suspended' %}selected{% endif %}>Suspended</option></select></label>
+    <label><span>Verification</span><select name="verified"><option value="all" {% if filters.verified == 'all' %}selected{% endif %}>All users</option><option value="yes" {% if filters.verified == 'yes' %}selected{% endif %}>Verified</option><option value="no" {% if filters.verified == 'no' %}selected{% endif %}>Unverified</option></select></label>
+    <label><span>Account type</span><select name="role"><option value="all" {% if filters.role == 'all' %}selected{% endif %}>All accounts</option><option value="admin" {% if filters.role == 'admin' %}selected{% endif %}>FAST Administrator</option><option value="customer" {% if filters.role == 'customer' %}selected{% endif %}>Customer</option></select></label>
+    <div class="filter-actions"><button class="primary" type="submit">Apply filters</button><a class="button" href="/admin/users">Clear</a></div>
+  </form>
+</section>
+<section class="panel">
+  <div class="panel-heading"><div><h2>Registered users</h2><p>{{ users|length }} result{% if users|length != 1 %}s{% endif %}</p></div></div>
+  <div class="table-wrap"><table>
+    <thead><tr><th>User</th><th>Club</th><th>Verified</th><th>Status</th><th>Licence</th><th>Last login</th><th>Actions</th></tr></thead>
+    <tbody>{% for user in users %}<tr>
+      <td><div class="user-cell"><a href="/admin/users/{{ user.id }}"><strong>{{ user.full_name or 'Unnamed user' }}</strong></a><span>{{ user.email }}</span>{% if user.is_admin %}<small>FAST Administrator</small>{% endif %}</div></td>
+      <td>{{ user.club_memberships[0].club.name if user.club_memberships else '—' }}</td>
+      <td>{% if user.email_verified %}<span class="badge active">Verified</span>{% else %}<span class="badge unused">Unverified</span>{% endif %}</td>
+      <td><span class="badge {{ user.status }}">{{ user.status|title }}</span></td>
+      <td>{% if user.licences %}{{ user.licences[0].tier }}{% else %}—{% endif %}</td>
+      <td>{{ user.last_login_at.strftime('%d.%m.%Y %H:%M') if user.last_login_at else 'Never' }}</td>
+      <td><div class="row-actions"><a class="button" href="/admin/users/{{ user.id }}">Open</a>{% if not user.email_verified %}<form method="post" action="/admin/users/{{ user.id }}/verify"><button type="submit">Verify</button></form>{% endif %}<form method="post" action="/admin/users/{{ user.id }}/status"><input type="hidden" name="status" value="{{ 'suspended' if user.status == 'active' else 'active' }}"><button type="submit" {% if user.id == admin.id and user.status == 'active' %}disabled{% endif %}>{{ 'Suspend' if user.status == 'active' else 'Activate' }}</button></form></div></td>
+    </tr>{% else %}<tr><td colspan="7">No users match the selected filters.</td></tr>{% endfor %}</tbody>
+  </table></div>
+</section>
+{% endblock %}
