@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_current_user, require_admin
 from app.core.security import generate_licence_code, hash_licence_code, normalise_licence_code
 from app.core.entitlements import filter_products, filter_sports, licence_is_current
+from app.core.subscription_access import organisation_subscription_access
 from app.db.session import get_db
 from app.models import Club, ClubMember, DeviceActivation, DeviceAuditLog, Licence, User
 from app.schemas.licence import (
@@ -151,6 +152,9 @@ def activate(
     if not licence:
         raise HTTPException(status_code=404, detail="Licence code was not found")
     ensure_current(licence)
+    subscription_access = organisation_subscription_access(db, user.organisation_id)
+    if not subscription_access.allowed:
+        raise HTTPException(status_code=403, detail=subscription_access.message)
     if licence.owner_type == "individual":
         if licence.user_id and licence.user_id != user.id:
             raise HTTPException(status_code=409, detail="Licence is assigned to another account")
@@ -221,6 +225,9 @@ def current(user: User = Depends(get_current_user), db: Session = Depends(get_db
     if not licence:
         return {"licence": None}
     ensure_current(licence)
+    subscription_access = organisation_subscription_access(db, user.organisation_id)
+    if not subscription_access.allowed:
+        return {"licence": None, "subscription_access": subscription_access.payload()}
     active_count = db.scalar(select(func.count(DeviceActivation.id)).where(
         DeviceActivation.licence_id == licence.id,
         DeviceActivation.active.is_(True),
@@ -238,6 +245,9 @@ def validate(
     if not licence:
         raise HTTPException(status_code=404, detail="No active licence")
     ensure_current(licence)
+    subscription_access = organisation_subscription_access(db, user.organisation_id)
+    if not subscription_access.allowed:
+        raise HTTPException(status_code=403, detail=subscription_access.message)
     activation = db.scalar(select(DeviceActivation).where(
         DeviceActivation.licence_id == licence.id,
         DeviceActivation.device_id == payload.device_id,
@@ -262,6 +272,9 @@ def entitlements(user: User = Depends(get_current_user), db: Session = Depends(g
         return {"licensed": False, "products": [], "sports": [], "features": [], "licence": None}
     if not licence_is_current(licence.status, licence.expires_at):
         return {"licensed": False, "products": [], "sports": [], "features": [], "licence": None}
+    subscription_access = organisation_subscription_access(db, user.organisation_id)
+    if not subscription_access.allowed:
+        return {"licensed": False, "products": [], "sports": [], "features": [], "licence": None, "subscription_access": subscription_access.payload()}
     active_count = db.scalar(select(func.count(DeviceActivation.id)).where(
         DeviceActivation.licence_id == licence.id, DeviceActivation.active.is_(True)
     )) or 0
@@ -279,6 +292,7 @@ def entitlements(user: User = Depends(get_current_user), db: Session = Depends(g
         "sports": payload["sports"],
         "features": payload["features"],
         "licence": payload,
+        "subscription_access": subscription_access.payload(),
     }
 
 

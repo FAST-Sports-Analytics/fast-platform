@@ -2400,7 +2400,9 @@ def create_subscription_plan(
 
 @router.post("/subscriptions/assign")
 def assign_subscription_plan(request: Request, organisation_id: int = Form(...), plan_id: int = Form(...),
-    status: str = Form("active"), billing_interval: str = Form("monthly"), seat_override: str = Form(""), db: Session = Depends(get_db)):
+    status: str = Form("active"), billing_interval: str = Form("monthly"), seat_override: str = Form(""),
+    current_period_ends_at: str = Form(""), grace_ends_at: str = Form(""), cancel_at_period_end: str | None = Form(None),
+    db: Session = Depends(get_db)):
     admin = require_portal_admin(request, db)
     if not admin.is_admin:
         raise HTTPException(status_code=403, detail="FAST owner access required")
@@ -2419,11 +2421,24 @@ def assign_subscription_plan(request: Request, organisation_id: int = Form(...),
         db.commit()
         return RedirectResponse("/admin/subscriptions?error=The+selected+plan+does+not+have+enough+user+seats+for+this+organisation.", status_code=303)
     previous_limit = effective_user_seat_limit(db, organisation)
-    item.plan_id = plan.id; item.status = status if status in {"trial","active","past_due","grace_period","cancelled","expired"} else "active"
+    def _parse_admin_date(value: str):
+        clean = value.strip()
+        if not clean:
+            return None
+        try:
+            parsed = datetime.fromisoformat(clean)
+        except ValueError:
+            return None
+        return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
+
+    item.plan_id = plan.id; item.status = status if status in {"trial","active","past_due","grace_period","cancelled","suspended","expired"} else "active"
     item.billing_interval = billing_interval if billing_interval in {"monthly","annual","manual"} else "monthly"
     item.seat_override = requested_override
+    item.current_period_ends_at = _parse_admin_date(current_period_ends_at)
+    item.grace_ends_at = _parse_admin_date(grace_ends_at)
+    item.cancel_at_period_end = bool(cancel_at_period_end)
     organisation.subscription_tier = plan.name; organisation.max_seats = new_seat_limit
-    _record_audit(db, admin, action="subscription_assigned", category="billing", target_type="organisation", target_id=organisation.id, target_label=organisation.name, details=f"Assigned {plan.name} ({item.billing_interval}); user seats {new_seat_limit}.")
+    _record_audit(db, admin, action="subscription_assigned", category="billing", target_type="organisation", target_id=organisation.id, target_label=organisation.name, details=f"Assigned {plan.name} ({item.billing_interval}); status {item.status}; user seats {new_seat_limit}.")
     if previous_limit != new_seat_limit:
         _record_audit(db, admin, action="seat_limit_changed", category="billing", target_type="organisation", target_id=organisation.id, target_label=organisation.name, details=f"User seat limit changed from {previous_limit} to {new_seat_limit} by subscription assignment.")
     db.commit()

@@ -12,6 +12,7 @@ from app.core.email import EmailDeliveryError, branded_action_email, send_email
 from app.core.config import get_settings
 from app.core.rate_limit import RateLimit, client_address, limiter
 from app.core.entitlements import filter_products, filter_sports, licence_is_current
+from app.core.subscription_access import organisation_subscription_access
 from app.core.security import (
     create_access_token,
     create_refresh_token,
@@ -165,6 +166,9 @@ def licence_payload(db: Session, user: User) -> dict | None:
     )) or 0
     if not licence_is_current(licence.status, licence.expires_at):
         return None
+    subscription_access = organisation_subscription_access(db, user.organisation_id)
+    if not subscription_access.allowed:
+        return None
     platform_admin = bool(user.is_admin and user.organisation_id is None)
     access_role = _access_role_for_licence(db, user, licence)
     products = filter_products(
@@ -192,6 +196,7 @@ def licence_payload(db: Session, user: User) -> dict | None:
         "access_role": access_role,
         "organisation": organisation_payload(licence),
         "subscription": subscription_payload(db, user.organisation_id) if user.organisation_id else None,
+        "subscription_access": subscription_access.payload(),
     }
 
 
@@ -415,9 +420,10 @@ def session_status(
     The Launcher uses this endpoint after login and session restoration so product
     access is never granted from stale locally cached licence data.
     """
+    subscription_access = organisation_subscription_access(db, user.organisation_id)
     licence_data = licence_payload(db, user)
     device_activated = False
-    device_message = "No active licence is assigned to this account."
+    device_message = subscription_access.message if not subscription_access.allowed else "No active licence is assigned to this account."
 
     if licence_data:
         # Look up the device regardless of active state.  An inactive row means an
@@ -477,4 +483,5 @@ def session_status(
         "licence": licence_data,
         "device_activated": device_activated,
         "device_message": device_message,
+        "subscription_access": subscription_access.payload(),
     }

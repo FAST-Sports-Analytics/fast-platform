@@ -12,6 +12,7 @@ from app.api.deps import get_current_user
 from app.db.session import get_db
 from app.models import AuditLog, Organisation, OrganisationSubscription, SubscriptionPlan, User
 from app.core.seats import allocated_user_count
+from app.core.subscription_access import evaluate_subscription
 
 router = APIRouter(prefix="/subscriptions", tags=["subscriptions"])
 
@@ -57,6 +58,7 @@ def subscription_payload(db: Session, organisation_id: int) -> dict:
             "billing_ready": False,
         }
     status = str(item.status or "unconfigured").lower()
+    access = evaluate_subscription(item)
     period_value = item.trial_ends_at if status == "trial" else item.current_period_ends_at
     period_label = "Trial ends" if status == "trial" else ("Access ends" if item.cancel_at_period_end else "Renews")
     return {
@@ -74,6 +76,7 @@ def subscription_payload(db: Session, organisation_id: int) -> dict:
         "billing_provider": item.billing_provider,
         "seat_override": item.seat_override,
         "plan": plan_payload(item.plan),
+        "access": access.payload(),
     }
 
 
@@ -133,6 +136,9 @@ class AssignmentRequest(BaseModel):
     organisation_id: int
     plan_id: int
     status: str = "active"
+    current_period_ends_at: datetime | None = None
+    grace_ends_at: datetime | None = None
+    cancel_at_period_end: bool = False
     billing_interval: str = "monthly"
     seat_override: int | None = Field(default=None, ge=1)
 
@@ -155,7 +161,10 @@ def assign_plan(payload: AssignmentRequest, user: User = Depends(get_current_use
         raise HTTPException(status_code=409, detail=f"Cannot assign a plan with {new_seat_limit} seats while {allocated_seats} user seats are allocated")
     previous_limit = int(organisation.max_seats or 1)
     item.plan_id = plan.id
-    item.status = payload.status if payload.status in {"trial", "active", "past_due", "grace_period", "cancelled", "expired"} else "active"
+    item.status = payload.status if payload.status in {"trial", "active", "past_due", "grace_period", "cancelled", "suspended", "expired"} else "active"
+    item.current_period_ends_at = payload.current_period_ends_at
+    item.grace_ends_at = payload.grace_ends_at
+    item.cancel_at_period_end = bool(payload.cancel_at_period_end)
     item.billing_interval = payload.billing_interval if payload.billing_interval in {"monthly", "annual", "manual"} else "monthly"
     item.seat_override = payload.seat_override
     item.updated_at = datetime.now(timezone.utc)

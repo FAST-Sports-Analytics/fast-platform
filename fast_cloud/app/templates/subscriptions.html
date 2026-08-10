@@ -32,11 +32,11 @@
 <form method="post" action="/admin/subscriptions/assign" class="form-grid">
 <label>Organisation<select name="organisation_id" required>{% for org in organisations %}<option value="{{ org.id }}">{{ org.name }}</option>{% endfor %}</select></label>
 <label>Plan<select name="plan_id" required>{% for plan in plans if plan.active %}<option value="{{ plan.id }}">{{ plan.name }}</option>{% endfor %}</select></label>
-<label>Status<select name="status"><option>active</option><option>trial</option><option>past_due</option><option>grace_period</option><option>cancelled</option><option>expired</option></select></label>
+<label>Status<select name="status"><option>active</option><option>trial</option><option>past_due</option><option>grace_period</option><option>cancelled</option><option>suspended</option><option>expired</option></select></label>
 <label>Billing interval<select name="billing_interval"><option>monthly</option><option>annual</option><option>manual</option></select></label>
-<label>Seat override<input name="seat_override" type="number" min="1" placeholder="Use plan default"></label>
+<label>Seat override<input name="seat_override" type="number" min="1" placeholder="Use plan default"></label><label>Current period ends<input name="current_period_ends_at" type="datetime-local"></label><label>Grace period ends<input name="grace_ends_at" type="datetime-local"></label><label><input type="checkbox" name="cancel_at_period_end" value="1"> Cancel at period end</label>
 <div><button class="primary" type="submit">Assign subscription</button></div></form></section>
-<section class="panel"><h2>Organisation subscriptions</h2><div class="table-wrap"><table><thead><tr><th>Organisation</th><th>Plan</th><th>Status</th><th>Interval</th><th>Period end</th></tr></thead><tbody>
-{% for item in subscriptions %}<tr><td>{{ item.organisation.name }}</td><td>{{ item.plan.name if item.plan else 'Unassigned' }}</td><td>{{ item.status|replace('_',' ')|title }}</td><td>{{ item.billing_interval|title }}</td><td>{{ item.current_period_ends_at or 'Not set' }}</td></tr>{% else %}<tr><td colspan="5">No organisation subscriptions assigned.</td></tr>{% endfor %}
+<section class="panel"><h2>Organisation subscriptions</h2><p class="muted">Active and trial grant normal access. Past due/grace retain access until the grace end. Cancelled retains access until the paid period ends. Suspended and expired block FAST applications.</p><div class="table-wrap"><table><thead><tr><th>Organisation</th><th>Plan</th><th>Status</th><th>Interval</th><th>Period end</th><th>Grace end</th></tr></thead><tbody>
+{% for item in subscriptions %}<tr><td>{{ item.organisation.name }}</td><td>{{ item.plan.name if item.plan else 'Unassigned' }}</td><td>{{ item.status|replace('_',' ')|title }}{% if item.cancel_at_period_end %}<br><small>Ends at period end</small>{% endif %}</td><td>{{ item.billing_interval|title }}</td><td>{{ item.current_period_ends_at or 'Not set' }}</td><td>{{ item.grace_ends_at or 'Not set' }}</td></tr>{% else %}<tr><td colspan="6">No organisation subscriptions assigned.</td></tr>{% endfor %}
 </tbody></table></div></section>
 {% endblock %}
