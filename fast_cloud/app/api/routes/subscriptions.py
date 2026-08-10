@@ -155,7 +155,16 @@ def assign_plan(payload: AssignmentRequest, user: User = Depends(get_current_use
     if not item:
         item = OrganisationSubscription(organisation_id=organisation.id)
         db.add(item)
-    new_seat_limit = int(payload.seat_override or plan.included_seats or 1)
+    same_plan = bool(item.id and item.plan_id == plan.id)
+    # Preserve the current capacity when the existing subscription is being
+    # edited without an explicit seat override.  This keeps status-only changes
+    # (such as active -> suspended -> active) independent from seat validation.
+    if same_plan and payload.seat_override is None:
+        new_seat_limit = int(organisation.max_seats or plan.included_seats or 1)
+        effective_override = item.seat_override
+    else:
+        new_seat_limit = int(payload.seat_override or plan.included_seats or 1)
+        effective_override = payload.seat_override
     allocated_seats = allocated_user_count(db, organisation.id)
     if new_seat_limit < allocated_seats:
         raise HTTPException(status_code=409, detail=f"Cannot assign a plan with {new_seat_limit} seats while {allocated_seats} user seats are allocated")
@@ -166,7 +175,7 @@ def assign_plan(payload: AssignmentRequest, user: User = Depends(get_current_use
     item.grace_ends_at = payload.grace_ends_at
     item.cancel_at_period_end = bool(payload.cancel_at_period_end)
     item.billing_interval = payload.billing_interval if payload.billing_interval in {"monthly", "annual", "manual"} else "monthly"
-    item.seat_override = payload.seat_override
+    item.seat_override = effective_override
     item.updated_at = datetime.now(timezone.utc)
     organisation.subscription_tier = plan.name
     organisation.max_seats = new_seat_limit

@@ -2414,7 +2414,17 @@ def assign_subscription_plan(request: Request, organisation_id: int = Form(...),
     if not item:
         item = OrganisationSubscription(organisation_id=organisation.id); db.add(item)
     requested_override = int(seat_override) if seat_override.strip().isdigit() and int(seat_override) > 0 else None
-    new_seat_limit = int(requested_override or plan.included_seats or 1)
+    same_plan = bool(item.id and item.plan_id == plan.id)
+    # A blank seat override means "leave capacity alone" when editing the existing
+    # subscription (for example active -> suspended).  Re-applying the plan's
+    # default here could otherwise turn a status-only update into an accidental
+    # seat downgrade and block the update.
+    if same_plan and requested_override is None:
+        new_seat_limit = int(effective_user_seat_limit(db, organisation))
+        effective_override = item.seat_override
+    else:
+        new_seat_limit = int(requested_override or plan.included_seats or 1)
+        effective_override = requested_override
     allocated_seats = allocated_user_count(db, organisation.id)
     if new_seat_limit < allocated_seats:
         _record_audit(db, admin, action="seat_allocation_blocked", category="billing", target_type="organisation", target_id=organisation.id, target_label=organisation.name, details=f"Subscription assignment blocked: requested {new_seat_limit} user seats while {allocated_seats} are allocated.")
@@ -2433,7 +2443,7 @@ def assign_subscription_plan(request: Request, organisation_id: int = Form(...),
 
     item.plan_id = plan.id; item.status = status if status in {"trial","active","past_due","grace_period","cancelled","suspended","expired"} else "active"
     item.billing_interval = billing_interval if billing_interval in {"monthly","annual","manual"} else "monthly"
-    item.seat_override = requested_override
+    item.seat_override = effective_override
     item.current_period_ends_at = _parse_admin_date(current_period_ends_at)
     item.grace_ends_at = _parse_admin_date(grace_ends_at)
     item.cancel_at_period_end = bool(cancel_at_period_end)
