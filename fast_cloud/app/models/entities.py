@@ -148,7 +148,7 @@ class ClubMember(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     club_id: Mapped[int] = mapped_column(ForeignKey("clubs.id"))
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
-    role: Mapped[str] = mapped_column(String(40), default="member")
+    role: Mapped[str] = mapped_column(String(40), default="coach")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     club: Mapped[Club] = relationship(back_populates="members")

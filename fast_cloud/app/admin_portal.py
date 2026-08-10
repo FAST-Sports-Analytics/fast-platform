@@ -339,7 +339,7 @@ def create_user(
     if club_id:
         club = db.get(Club, int(club_id))
         if club:
-            db.add(ClubMember(club_id=club.id, user_id=user.id, role="member"))
+            db.add(ClubMember(club_id=club.id, user_id=user.id, role="coach"))
     if licence_id:
         licence = db.get(Licence, int(licence_id))
         if licence and licence.owner_type == "individual" and licence.user_id is None:
@@ -546,7 +546,7 @@ def edit_user(
     if club_id:
         club = db.get(Club, int(club_id))
         if club:
-            db.add(ClubMember(club_id=club.id, user_id=user.id, role="member"))
+            db.add(ClubMember(club_id=club.id, user_id=user.id, role="coach"))
     current_individual = list(user.licences)
     selected_id = int(licence_id) if licence_id else None
     for licence in current_individual:
@@ -898,7 +898,7 @@ def update_club(
     club.owner_user_id = owner_id
     for member in club.members:
         if member.role == "owner" and member.user_id != owner_id:
-            member.role = "member"
+            member.role = "coach"
     if owner_id and not any(m.user_id == owner_id for m in club.members):
         db.add(ClubMember(club_id=club.id, user_id=owner_id, role="owner"))
     elif owner_id:
@@ -912,7 +912,7 @@ def add_club_member(
     club_id: int,
     request: Request,
     user_id: int = Form(...),
-    role: str = Form("member"),
+    role: str = Form("coach"),
     db: Session = Depends(get_db),
 ):
     require_portal_admin(request, db)
@@ -922,7 +922,7 @@ def add_club_member(
         raise HTTPException(status_code=404, detail="Club or user not found")
     if any(member.user_id == user_id for member in club.members):
         return RedirectResponse(f"/admin/clubs/{club_id}?error=User+is+already+a+member.", status_code=303)
-    valid_role = role if role in {"analyst", "coach", "viewer", "member"} else "member"
+    valid_role = role if role in {"analyst", "coach"} else "coach"
     db.add(ClubMember(club_id=club_id, user_id=user_id, role=valid_role))
     db.commit()
     return RedirectResponse(f"/admin/clubs/{club_id}?message=Member+added.", status_code=303)

@@ -41,9 +41,9 @@ def migrate_schema(engine: Engine) -> None:
             # ``is_admin`` is reserved for platform-wide FAST administrators.
             # Older builds also set it for organisation administrators; retain
             # their role while removing unintended global Cloud Admin access.
-            connection.execute(text("UPDATE users SET role='administrator' WHERE is_admin IS TRUE AND organisation_id IS NOT NULL"))
-            connection.execute(text("UPDATE users SET is_admin=FALSE WHERE organisation_id IS NOT NULL"))
-            connection.execute(text("UPDATE users SET role='administrator' WHERE is_admin IS TRUE AND organisation_id IS NULL"))
+            connection.execute(text("UPDATE users SET role='administrator' WHERE is_admin=1 AND organisation_id IS NOT NULL"))
+            connection.execute(text("UPDATE users SET is_admin=0 WHERE organisation_id IS NOT NULL"))
+            connection.execute(text("UPDATE users SET role='administrator' WHERE is_admin=1 AND organisation_id IS NULL"))
             connection.execute(text("UPDATE users SET role='analyst' WHERE role IS NULL OR role=''"))
 
 
@@ -77,6 +77,14 @@ def migrate_schema(engine: Engine) -> None:
         if "organisation_id" not in club_columns:
             with engine.begin() as connection:
                 connection.execute(text("ALTER TABLE clubs ADD COLUMN organisation_id INTEGER REFERENCES organisations(id)"))
+
+    if "club_members" in table_names:
+        # Club access roles are intentionally limited to Analyst and Coach.
+        # Owner remains system-managed. Legacy Viewer/Member rows are mapped
+        # to Coach, the least-privileged product-bearing club role.
+        with engine.begin() as connection:
+            connection.execute(text("UPDATE club_members SET role='coach' WHERE role IN ('viewer', 'member') OR role IS NULL OR role=''"))
+
 
 
     if "releases" in table_names:
