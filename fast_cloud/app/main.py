@@ -45,7 +45,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="FAST Cloud API",
-    version="0.20.0a",
+    version="0.20.1a",
     description="Authentication, licensing and administration for FAST Sports Analytics.",
     lifespan=lifespan,
 )
@@ -124,7 +124,7 @@ def health() -> dict:
     return {
         "status": "ok" if healthy else "degraded",
         "service": settings.app_name,
-        "version": "0.20.0a",
+        "version": "0.20.1a",
         "environment": settings.environment,
         "checks": {
             "database": {"ok": database_ok, "detail": database_detail},
@@ -139,10 +139,10 @@ def readiness() -> dict:
     try:
         with engine.connect() as connection:
             connection.execute(text("SELECT 1"))
-        return {"status": "ready", "service": settings.app_name, "version": "0.20.0a"}
+        return {"status": "ready", "service": settings.app_name, "version": "0.20.1a"}
     except Exception:
         from fastapi.responses import JSONResponse
         return JSONResponse(
             status_code=503,
-            content={"status": "not_ready", "service": settings.app_name, "version": "0.20.0a"},
+            content={"status": "not_ready", "service": settings.app_name, "version": "0.20.1a"},
         )
