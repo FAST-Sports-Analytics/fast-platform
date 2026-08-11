@@ -51,6 +51,20 @@ SERVER_STARTED_AT = datetime.now(timezone.utc)
 RELEASES_ROOT = Path(__file__).resolve().parents[1] / "releases"
 
 
+def _stripe_admin_test_mode() -> bool:
+    """Return True only when the configured Stripe server key is a test key.
+
+    Billing accepts both the FAST_CLOUD_ prefixed variables and the shorter
+    compatibility variables used by the current Railway deployment. Never
+    expose billing test controls when Stripe is live or unconfigured.
+    """
+    secret = (
+        os.getenv("FAST_CLOUD_STRIPE_SECRET_KEY", "").strip()
+        or os.getenv("STRIPE_SECRET_KEY", "").strip()
+    )
+    return secret.startswith("sk_test_")
+
+
 def _safe_release_filename(item: Release, original_name: str) -> str:
     suffix = Path(original_name).suffix.lower()
     if suffix != ".zip":
@@ -2400,10 +2414,61 @@ def subscriptions_page(request: Request, db: Session = Depends(get_db)):
     return templates.TemplateResponse(request, "subscriptions.html", {
         "admin": admin, "plans": plans, "organisations": organisations, "subscriptions": subscriptions,
         "billing_diagnostics": billing_diagnostics, "recent_webhooks": recent_webhooks[:25],
+        "billing_test_mode": _stripe_admin_test_mode(),
         "active_count": sum(1 for item in subscriptions if item.status == "active"),
         "trial_count": sum(1 for item in subscriptions if item.status == "trial"),
         "risk_count": sum(1 for item in subscriptions if item.status in {"past_due", "grace_period"}),
     })
+
+
+@router.post("/subscriptions/{subscription_id}/expire-grace-test")
+def expire_subscription_grace_for_test(
+    subscription_id: int, request: Request, db: Session = Depends(get_db),
+):
+    """Sandbox-only control to exercise the real grace-expiry access path.
+
+    This deliberately expires the local FAST grace deadline without changing
+    the Stripe subscription or inventing a provider status. The normal access
+    evaluator will therefore block applications for the same reason it would
+    after a real grace deadline passes. A later successful Stripe payment can
+    still restore the subscription through the normal webhook path.
+    """
+    admin = require_portal_admin(request, db)
+    if not admin.is_admin:
+        raise HTTPException(status_code=403, detail="FAST owner access required")
+    if not _stripe_admin_test_mode():
+        raise HTTPException(status_code=404, detail="Billing test control is unavailable")
+
+    from app.models import OrganisationSubscription
+    item = db.get(OrganisationSubscription, subscription_id)
+    if not item:
+        return RedirectResponse("/admin/subscriptions?error=Subscription+not+found.", status_code=303)
+    if item.billing_provider != "stripe":
+        return RedirectResponse("/admin/subscriptions?error=Only+Stripe+test+subscriptions+can+use+this+control.", status_code=303)
+    if item.status not in {"past_due", "grace_period"}:
+        return RedirectResponse("/admin/subscriptions?error=Subscription+is+not+currently+in+payment+grace.", status_code=303)
+
+    previous_grace_end = item.grace_ends_at
+    now = datetime.now(timezone.utc)
+    item.grace_ends_at = now - timedelta(seconds=1)
+    item.updated_at = now
+    _record_audit(
+        db, admin,
+        action="subscription_grace_expired_test",
+        category="billing",
+        target_type="organisation_subscription",
+        target_id=item.id,
+        target_label=item.organisation.name if item.organisation else f"Subscription {item.id}",
+        details=(
+            "Sandbox billing test: grace deadline forced past due for access-control validation. "
+            f"Previous grace end: {previous_grace_end or 'not set'}."
+        ),
+    )
+    db.commit()
+    return RedirectResponse(
+        "/admin/subscriptions?message=Sandbox+grace+deadline+expired.+FAST+access+should+now+be+blocked.",
+        status_code=303,
+    )
 
 
 @router.post("/subscriptions/plans")
