@@ -233,6 +233,16 @@ _STRIPE_LOOKUP_KEYS: dict[tuple[str, str], str] = {
     ("professional", "annual"): "fast_professional_annual",
 }
 
+# Known Stripe catalogue IDs are kept as a fallback for dashboard-created
+# prices where a lookup key was omitted.  The live subscription price is the
+# source of truth for tier switches; checkout metadata is only a fallback.
+_STRIPE_PRICE_PLAN_KEYS: dict[str, tuple[str, str]] = {
+    "price_1U3KSfGksGfK5ZjdoBKFlQOG": ("starter", "monthly"),
+    "price_1U3KT1GksGfK5ZjdErkEpH85": ("starter", "annual"),
+    "price_1U3DxcGksGfK5ZjdPqDjvJb7": ("professional", "monthly"),
+    "price_1U3DxcGksGfK5ZjdRvwhIQWd": ("professional", "annual"),
+}
+
 
 def _stripe_price_for_plan(plan: SubscriptionPlan, interval: str):
     lookup_key = _STRIPE_LOOKUP_KEYS.get((str(plan.name or "").strip().lower(), interval))
@@ -761,6 +771,43 @@ def _subscription_items(subscription) -> list:
     return list(_obj_get(_obj_get(subscription, "items", {}), "data", []) or [])
 
 
+def _subscription_price_identity(subscription) -> tuple[str, str]:
+    """Return (price_id, lookup_key) for the first recurring Stripe item."""
+    items = _subscription_items(subscription)
+    if not items:
+        return "", ""
+    price = _obj_get(items[0], "price", {}) or {}
+    return (
+        str(_obj_get(price, "id", "") or "").strip(),
+        str(_obj_get(price, "lookup_key", "") or "").strip(),
+    )
+
+
+def _plan_from_live_stripe_price(db: Session, subscription) -> SubscriptionPlan | None:
+    """Resolve the FAST plan represented by the subscription's live Stripe price.
+
+    Stripe Dashboard price/tier changes preserve the subscription metadata from
+    the original checkout.  Therefore metadata cannot be authoritative for a
+    later Professional -> Starter (or reverse) switch.
+    """
+    price_id, lookup_key = _subscription_price_identity(subscription)
+    plan_key = None
+    if lookup_key:
+        for (candidate_plan, candidate_interval), candidate_lookup in _STRIPE_LOOKUP_KEYS.items():
+            if lookup_key == candidate_lookup:
+                plan_key = candidate_plan
+                break
+    if plan_key is None and price_id:
+        mapped = _STRIPE_PRICE_PLAN_KEYS.get(price_id)
+        if mapped:
+            plan_key = mapped[0]
+    if not plan_key:
+        return None
+    return db.scalar(
+        select(SubscriptionPlan).where(func.lower(SubscriptionPlan.name) == plan_key.lower())
+    )
+
+
 def _subscription_quantity(subscription) -> int:
     """Return the paid Stripe quantity, defaulting safely to one unit."""
     items = _subscription_items(subscription)
@@ -883,12 +930,13 @@ def _sync_stripe_subscription(db: Session, subscription) -> None:
     if not item:
         item = OrganisationSubscription(organisation_id=organisation.id)
         db.add(item)
-    # Resolve the plan explicitly instead of relying on ``item.plan`` being
-    # refreshed after assigning plan_id.  During first-checkout provisioning
-    # the OrganisationSubscription row has only just been flushed, and the
-    # relationship can otherwise still read as None in this transaction.
-    effective_plan = None
-    if plan_id.isdigit():
+    # The live Stripe price is authoritative for tier changes. Dashboard
+    # changes do not rewrite checkout metadata, so relying on fast_plan_id would
+    # leave a downgraded Starter subscription provisioned as Professional.
+    effective_plan = _plan_from_live_stripe_price(db, subscription)
+    if effective_plan:
+        item.plan_id = effective_plan.id
+    elif plan_id.isdigit():
         effective_plan = db.get(SubscriptionPlan, int(plan_id))
         if effective_plan:
             item.plan_id = effective_plan.id
