@@ -726,19 +726,50 @@ def _map_stripe_status(value: str | None) -> str:
     }.get(status, "active")
 
 
+def _subscription_items(subscription) -> list:
+    return list(_obj_get(_obj_get(subscription, "items", {}), "data", []) or [])
+
+
+def _subscription_quantity(subscription) -> int:
+    """Return the paid Stripe quantity, defaulting safely to one unit."""
+    items = _subscription_items(subscription)
+    if not items:
+        return 1
+    try:
+        return max(1, int(_obj_get(items[0], "quantity", 1) or 1))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _subscription_billing_interval(subscription, fallback: str = "monthly") -> str:
+    """Resolve the live billing interval from Stripe rather than stale metadata."""
+    items = _subscription_items(subscription)
+    if items:
+        price = _obj_get(items[0], "price", {}) or {}
+        recurring = _obj_get(price, "recurring", {}) or {}
+        interval = str(_obj_get(recurring, "interval", "") or "").lower()
+        if interval == "year":
+            return "annual"
+        if interval == "month":
+            return "monthly"
+    return fallback if fallback in {"monthly", "annual", "manual"} else "monthly"
+
+
 def _subscription_period_end(subscription) -> datetime | None:
     # Stripe API versions can expose the billing period on the subscription
     # itself or on the first subscription item. Support both shapes.
     direct = _stripe_datetime(_obj_get(subscription, "current_period_end"))
     if direct:
         return direct
-    items = _obj_get(_obj_get(subscription, "items", {}), "data", []) or []
+    items = _subscription_items(subscription)
     if items:
         return _stripe_datetime(_obj_get(items[0], "current_period_end"))
     return None
 
 
-def _ensure_subscription_entitlements(db: Session, organisation: Organisation, plan: SubscriptionPlan) -> None:
+def _ensure_subscription_entitlements(
+    db: Session, organisation: Organisation, plan: SubscriptionPlan, *, quantity: int = 1
+) -> None:
     """Materialise plan entitlements as the organisation's managed club licence.
 
     Desktop authentication/device activation is licence-backed, so a paid
@@ -750,8 +781,12 @@ def _ensure_subscription_entitlements(db: Session, organisation: Organisation, p
     plan_sports = _loads(plan.sports_json, [])
     selected_sports = plan_sports or _loads(organisation.sports_json, [])
 
+    quantity = max(1, int(quantity or 1))
+    licensed_users = max(1, int(plan.included_seats or 1)) * quantity
+    licensed_devices = max(1, int(plan.max_devices or 1)) * quantity
+
     organisation.subscription_tier = plan.name
-    organisation.max_seats = max(1, int(plan.included_seats or 1))
+    organisation.max_seats = licensed_users
     organisation.sports_json = json.dumps(selected_sports)
 
     club = db.scalar(select(Club).where(Club.organisation_id == organisation.id).order_by(Club.id))
@@ -786,8 +821,8 @@ def _ensure_subscription_entitlements(db: Session, organisation: Organisation, p
     licence.products_json = json.dumps(products)
     licence.sports_json = json.dumps(selected_sports)
     licence.features_json = plan.features_json or "{}"
-    licence.max_devices = max(1, int(plan.max_devices or 1))
-    licence.max_users = max(1, int(plan.included_seats or 1))
+    licence.max_devices = licensed_devices
+    licence.max_users = licensed_users
     licence.status = "active"
     licence.renewable = True
 
@@ -838,7 +873,9 @@ def _sync_stripe_subscription(db: Session, subscription) -> None:
         item.status = mapped_status
         if mapped_status in {"active", "trial"}:
             item.grace_ends_at = None
-    item.billing_interval = str(_obj_get(metadata, "fast_billing_interval", item.billing_interval or "monthly"))
+    metadata_interval = str(_obj_get(metadata, "fast_billing_interval", item.billing_interval or "monthly") or "monthly")
+    quantity = _subscription_quantity(subscription)
+    item.billing_interval = _subscription_billing_interval(subscription, metadata_interval)
     item.billing_provider = "stripe"
     item.external_customer_id = str(_obj_get(subscription, "customer", "") or item.external_customer_id or "") or None
     item.external_subscription_id = str(_obj_get(subscription, "id", "") or item.external_subscription_id or "") or None
@@ -848,12 +885,16 @@ def _sync_stripe_subscription(db: Session, subscription) -> None:
     item.updated_at = datetime.now(timezone.utc)
     if effective_plan:
         organisation.subscription_tier = effective_plan.name
-        organisation.max_seats = item.seat_override or effective_plan.included_seats
+        # Stripe quantity is the paid capacity multiplier. Store the resulting
+        # user-seat allowance as the subscription override because the shared
+        # seat evaluator otherwise falls back to the plan's single-unit limit.
+        item.seat_override = max(1, int(effective_plan.included_seats or 1)) * quantity
+        organisation.max_seats = item.seat_override
         # Keep the organisation/admin UI and the licence-backed desktop access
         # in lock-step with Stripe on every subscription sync.  This also makes
         # a resent webhook repair organisations created by older deployments.
         organisation.expires_at = item.current_period_ends_at
-        _ensure_subscription_entitlements(db, organisation, effective_plan)
+        _ensure_subscription_entitlements(db, organisation, effective_plan, quantity=quantity)
         for club in organisation.clubs:
             for licence in club.licences:
                 if licence.status == "active":
