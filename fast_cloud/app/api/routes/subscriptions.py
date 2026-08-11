@@ -144,7 +144,10 @@ def _provision_public_checkout(db: Session, session, subscription) -> None:
         return
 
     plan_sports = _loads(plan.sports_json, [])
-    selected_sports = plan_sports or ([sport] if sport else [])
+    # Public Starter/Professional checkout sells a selected sport entitlement.
+    # Respect the customer's choice even when a seeded plan carries football as
+    # its display/default sport.
+    selected_sports = ([sport] if sport else plan_sports)
     organisation = Organisation(
         name=organisation_name,
         contact_name=contact_name,
@@ -245,20 +248,37 @@ _STRIPE_PRICE_PLAN_KEYS: dict[str, tuple[str, str]] = {
 
 
 def _stripe_price_for_plan(plan: SubscriptionPlan, interval: str):
-    lookup_key = _STRIPE_LOOKUP_KEYS.get((str(plan.name or "").strip().lower(), interval))
+    plan_key = str(plan.name or "").strip().lower()
+    lookup_key = _STRIPE_LOOKUP_KEYS.get((plan_key, interval))
     if not lookup_key:
         raise HTTPException(status_code=409, detail="This plan requires a FAST sales-assisted agreement")
 
     _configure_stripe()
+    price = None
     try:
         prices = stripe.Price.list(lookup_keys=[lookup_key], active=True, limit=1)
+        data = _obj_get(prices, "data", []) or []
+        if data:
+            price = data[0]
+        else:
+            # Dashboard-created sandbox prices do not necessarily have a lookup
+            # key. Fall back to FAST's known catalogue IDs so public checkout is
+            # still usable, while retaining the validation below as the safety
+            # boundary. Live catalogue prices should continue to use lookup keys.
+            known_price_id = next((
+                price_id
+                for price_id, mapped in _STRIPE_PRICE_PLAN_KEYS.items()
+                if mapped == (plan_key, interval)
+            ), None)
+            if known_price_id:
+                candidate = stripe.Price.retrieve(known_price_id)
+                if bool(_obj_get(candidate, "active", True)):
+                    price = candidate
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Stripe price catalogue could not be read: {exc}") from exc
 
-    data = _obj_get(prices, "data", []) or []
-    if not data:
+    if price is None:
         raise HTTPException(status_code=409, detail=f"Stripe price {lookup_key} is not configured yet")
-    price = data[0]
 
     expected_amount = plan.monthly_price_pence if interval == "monthly" else plan.annual_price_pence
     actual_amount = int(_obj_get(price, "unit_amount", 0) or 0)
@@ -857,7 +877,11 @@ def _ensure_subscription_entitlements(
     """
     products = _loads(plan.products_json, [])
     plan_sports = _loads(plan.sports_json, [])
-    selected_sports = plan_sports or _loads(organisation.sports_json, [])
+    # Preserve the organisation's purchased sport across Stripe resyncs/tier
+    # changes. A plan sport acts as a default only when the organisation has not
+    # already selected one.
+    organisation_sports = _loads(organisation.sports_json, [])
+    selected_sports = organisation_sports or plan_sports
 
     quantity = max(1, int(quantity or 1))
     licensed_users = max(1, int(plan.included_seats or 1)) * quantity
