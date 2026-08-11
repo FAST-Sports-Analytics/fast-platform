@@ -1,16 +1,21 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import secrets
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
 from app.core.config import get_settings
+from app.core.email import EmailDeliveryError, branded_action_email, send_email
+from app.core.rate_limit import RateLimit, client_address, limiter
+from app.core.security import hash_password
 from app.db.session import SessionLocal, get_db
 from app.models import AuditLog, Organisation, OrganisationSubscription, SubscriptionPlan, User
 
@@ -37,6 +42,162 @@ def _obj_get(value, key: str, default=None):
     if isinstance(value, dict):
         return value.get(key, default)
     return getattr(value, key, default)
+
+
+
+
+def _hash_one_time_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _normalise_email(value: str) -> str:
+    email = str(value or "").strip().lower()
+    if len(email) < 5 or "@" not in email or "." not in email.rsplit("@", 1)[-1]:
+        raise HTTPException(status_code=422, detail="Enter a valid work email address")
+    return email
+
+
+def _normalise_sport(value: str) -> str:
+    return str(value or "").strip().lower().replace(" ", "_")[:80]
+
+
+def _send_checkout_invitation(db: Session, user: User, organisation: Organisation) -> None:
+    token = secrets.token_urlsafe(40)
+    user.invitation_token_hash = _hash_one_time_token(token)
+    user.invitation_expires_at = datetime.now(timezone.utc) + timedelta(hours=settings.invite_expiry_hours)
+    user.invited_at = datetime.now(timezone.utc)
+    user.status = "invited"
+    user.must_change_password = False
+    db.commit()
+
+    invite_link = f"{settings.public_app_url.rstrip('/')}/accept-invite?token={token}"
+    text_body, html_body = branded_action_email(
+        heading=f"Welcome to {organisation.name} on FAST",
+        intro="Your FAST Sports Analytics subscription is ready. Activate your administrator account to continue.",
+        action_label="Activate FAST account",
+        action_url=invite_link,
+        expiry_text=f"This secure invitation expires in {settings.invite_expiry_hours} hours and can only be used once.",
+        footer_text="If you did not purchase this FAST subscription, contact support@fastsportsanalytics.com.",
+    )
+    try:
+        send_email(
+            to_email=user.email,
+            subject=f"Activate your {organisation.name} FAST account",
+            text=text_body,
+            html=html_body,
+        )
+    except EmailDeliveryError:
+        # Do not reject Stripe's webhook after payment. The platform owner can
+        # resend the invitation from FAST Cloud if transactional email fails.
+        return
+
+
+def _provision_public_checkout(db: Session, session, subscription) -> None:
+    session_metadata = _obj_get(session, "metadata", {}) or {}
+    if str(_obj_get(session_metadata, "fast_public_checkout", "")) != "1":
+        return
+
+    subscription_id = str(_obj_get(subscription, "id", "") or "")
+    if subscription_id:
+        existing_subscription = db.scalar(
+            select(OrganisationSubscription).where(OrganisationSubscription.external_subscription_id == subscription_id)
+        )
+        if existing_subscription:
+            _sync_stripe_subscription(db, subscription)
+            return
+
+    plan_id = str(_obj_get(session_metadata, "fast_plan_id", "") or "")
+    if not plan_id.isdigit():
+        return
+    plan = db.get(SubscriptionPlan, int(plan_id))
+    if not plan:
+        return
+
+    email = _normalise_email(str(_obj_get(session_metadata, "fast_contact_email", "") or ""))
+    organisation_name = str(_obj_get(session_metadata, "fast_organisation_name", "") or "").strip()[:180]
+    contact_name = str(_obj_get(session_metadata, "fast_contact_name", "") or "").strip()[:160]
+    sport = _normalise_sport(str(_obj_get(session_metadata, "fast_sport", "") or ""))
+    interval = str(_obj_get(session_metadata, "fast_billing_interval", "monthly") or "monthly")
+    if len(organisation_name) < 2 or not contact_name:
+        return
+
+    existing_user = db.scalar(select(User).where(func.lower(User.email) == email))
+    if existing_user:
+        # Idempotent retry: if a previous delivery already created the account,
+        # bind the Stripe subscription to that organisation and continue.
+        if existing_user.organisation_id:
+            organisation = db.get(Organisation, int(existing_user.organisation_id))
+            if organisation:
+                metadata = dict(_obj_get(subscription, "metadata", {}) or {})
+                metadata.update({
+                    "fast_organisation_id": str(organisation.id),
+                    "fast_plan_id": str(plan.id),
+                    "fast_billing_interval": interval,
+                })
+                stripe.Subscription.modify(subscription_id, metadata=metadata)
+                refreshed = stripe.Subscription.retrieve(subscription_id)
+                _sync_stripe_subscription(db, refreshed)
+        return
+
+    organisation = db.scalar(select(Organisation).where(func.lower(Organisation.name) == organisation_name.lower()))
+    if organisation:
+        return
+
+    plan_sports = _loads(plan.sports_json, [])
+    selected_sports = plan_sports or ([sport] if sport else [])
+    organisation = Organisation(
+        name=organisation_name,
+        contact_name=contact_name,
+        contact_email=email,
+        subscription_tier=plan.name,
+        sports_json=json.dumps(selected_sports),
+        max_seats=plan.included_seats,
+        status="active",
+    )
+    db.add(organisation)
+    db.flush()
+
+    products = _loads(plan.products_json, [])
+    admin_user = User(
+        email=email,
+        full_name=contact_name,
+        password_hash=hash_password(secrets.token_urlsafe(48)),
+        email_verified=False,
+        status="invited",
+        is_admin=False,
+        organisation_id=organisation.id,
+        role="administrator",
+        products_json=json.dumps(products),
+        sports_json=json.dumps(selected_sports),
+        must_change_password=False,
+        invited_at=datetime.now(timezone.utc),
+    )
+    db.add(admin_user)
+    db.flush()
+
+    item = OrganisationSubscription(
+        organisation_id=organisation.id,
+        plan_id=plan.id,
+        status="active",
+        billing_interval=interval,
+        billing_provider="stripe",
+        external_customer_id=str(_obj_get(subscription, "customer", "") or "") or None,
+        external_subscription_id=subscription_id or None,
+    )
+    db.add(item)
+    db.flush()
+
+    metadata = dict(_obj_get(subscription, "metadata", {}) or {})
+    metadata.update({
+        "fast_organisation_id": str(organisation.id),
+        "fast_plan_id": str(plan.id),
+        "fast_billing_interval": interval,
+    })
+    stripe.Subscription.modify(subscription_id, metadata=metadata)
+    refreshed = stripe.Subscription.retrieve(subscription_id)
+    _sync_stripe_subscription(db, refreshed)
+    db.commit()
+    _send_checkout_invitation(db, admin_user, organisation)
 
 
 def _stripe_secret_key() -> str:
@@ -267,6 +428,78 @@ def assign_plan(payload: AssignmentRequest, user: User = Depends(get_current_use
     return {"subscription": subscription_payload(db, organisation.id)}
 
 
+class PublicCheckoutRequest(BaseModel):
+    plan_id: int
+    billing_interval: str = "monthly"
+    organisation_name: str = Field(min_length=2, max_length=180)
+    contact_name: str = Field(min_length=1, max_length=160)
+    contact_email: str = Field(min_length=5, max_length=320)
+    sport: str = Field(default="football", max_length=80)
+
+
+@router.post("/public-checkout")
+def create_public_checkout_session(
+    payload: PublicCheckoutRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict:
+    if not _stripe_ready():
+        raise HTTPException(status_code=503, detail="Online billing is not configured yet")
+
+    limiter.enforce(
+        f"public-checkout:{client_address(request)}",
+        RateLimit(10, 3600),
+    )
+    email = _normalise_email(payload.contact_email)
+    organisation_name = payload.organisation_name.strip()
+    contact_name = payload.contact_name.strip()
+    sport = _normalise_sport(payload.sport)
+
+    if db.scalar(select(User).where(func.lower(User.email) == email)):
+        raise HTTPException(status_code=409, detail="That email already has a FAST account. Contact FAST to change an existing subscription.")
+    if db.scalar(select(Organisation).where(func.lower(Organisation.name) == organisation_name.lower())):
+        raise HTTPException(status_code=409, detail="That organisation already exists in FAST Cloud. Contact FAST to manage its subscription.")
+
+    plan = db.get(SubscriptionPlan, payload.plan_id)
+    if not plan or not plan.active:
+        raise HTTPException(status_code=404, detail="Subscription plan not found")
+    if str(plan.name or "").strip().lower() not in {"starter", "professional"}:
+        raise HTTPException(status_code=409, detail="This plan requires a FAST sales-assisted agreement")
+
+    interval = payload.billing_interval.lower().strip()
+    if interval not in {"monthly", "annual"}:
+        raise HTTPException(status_code=422, detail="Billing interval must be monthly or annual")
+    amount = plan.monthly_price_pence if interval == "monthly" else plan.annual_price_pence
+    if amount <= 0 or not bool(plan.self_service_upgrades):
+        raise HTTPException(status_code=409, detail="This plan requires a FAST sales-assisted agreement")
+
+    price = _stripe_price_for_plan(plan, interval)
+    metadata = {
+        "fast_public_checkout": "1",
+        "fast_plan_id": str(plan.id),
+        "fast_billing_interval": interval,
+        "fast_organisation_name": organisation_name,
+        "fast_contact_name": contact_name,
+        "fast_contact_email": email,
+        "fast_sport": sport,
+    }
+    _configure_stripe()
+    try:
+        session = stripe.checkout.Session.create(
+            mode="subscription",
+            line_items=[{"price": str(_obj_get(price, "id")), "quantity": 1}],
+            customer_email=email,
+            success_url=f"{settings.public_app_url.rstrip('/')}/pricing?checkout=success&session_id={{CHECKOUT_SESSION_ID}}",
+            cancel_url=f"{settings.public_app_url.rstrip('/')}/pricing?checkout=cancelled",
+            metadata=metadata,
+            subscription_data={"metadata": metadata},
+            allow_promotion_codes=True,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Stripe Checkout could not be created: {exc}") from exc
+    return {"url": _obj_get(session, "url"), "session_id": _obj_get(session, "id")}
+
+
 class CheckoutRequest(BaseModel):
     plan_id: int
     billing_interval: str = "monthly"
@@ -406,7 +639,11 @@ async def stripe_webhook(request: Request) -> dict:
             if subscription_id:
                 try:
                     subscription = stripe.Subscription.retrieve(subscription_id)
-                    _sync_stripe_subscription(db, subscription)
+                    session_metadata = _obj_get(data, "metadata", {}) or {}
+                    if str(_obj_get(session_metadata, "fast_public_checkout", "")) == "1":
+                        _provision_public_checkout(db, data, subscription)
+                    else:
+                        _sync_stripe_subscription(db, subscription)
                 except Exception:
                     db.rollback()
                     raise
