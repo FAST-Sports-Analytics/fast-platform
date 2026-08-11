@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -38,15 +39,71 @@ def _obj_get(value, key: str, default=None):
     return getattr(value, key, default)
 
 
+def _stripe_secret_key() -> str:
+    # FAST Cloud normally reads FAST_CLOUD_STRIPE_SECRET_KEY because Settings
+    # uses the FAST_CLOUD_ prefix.  Accept the shorter Railway variable too so
+    # an existing deployment does not silently report billing as unavailable.
+    return str(settings.stripe_secret_key or os.getenv("STRIPE_SECRET_KEY", "")).strip()
+
+
+def _stripe_webhook_secret() -> str:
+    return str(settings.stripe_webhook_secret or os.getenv("STRIPE_WEBHOOK_SECRET", "")).strip()
+
+
 def _stripe_ready(*, webhook: bool = False) -> bool:
-    if stripe is None or not settings.stripe_secret_key:
+    if stripe is None or not _stripe_secret_key():
         return False
-    return bool(settings.stripe_webhook_secret) if webhook else True
+    return bool(_stripe_webhook_secret()) if webhook else True
 
 
 def _configure_stripe() -> None:
     if stripe is not None:
-        stripe.api_key = settings.stripe_secret_key
+        stripe.api_key = _stripe_secret_key()
+
+
+# Stable FAST catalogue lookup keys.  The Professional sandbox prices currently
+# resolve to price_1U3DxcGksGfK5ZjdPqDjvJb7 (monthly) and
+# price_1U3DxcGksGfK5ZjdRvwhIQWd (annual).  Checkout resolves by lookup key so
+# future Stripe price replacements do not require another code change.
+_STRIPE_LOOKUP_KEYS: dict[tuple[str, str], str] = {
+    ("starter", "monthly"): "fast_starter_monthly",
+    ("starter", "annual"): "fast_starter_annual",
+    ("professional", "monthly"): "fast_professional_monthly",
+    ("professional", "annual"): "fast_professional_annual",
+}
+
+
+def _stripe_price_for_plan(plan: SubscriptionPlan, interval: str):
+    lookup_key = _STRIPE_LOOKUP_KEYS.get((str(plan.name or "").strip().lower(), interval))
+    if not lookup_key:
+        raise HTTPException(status_code=409, detail="This plan requires a FAST sales-assisted agreement")
+
+    _configure_stripe()
+    try:
+        prices = stripe.Price.list(lookup_keys=[lookup_key], active=True, limit=1)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Stripe price catalogue could not be read: {exc}") from exc
+
+    data = _obj_get(prices, "data", []) or []
+    if not data:
+        raise HTTPException(status_code=409, detail=f"Stripe price {lookup_key} is not configured yet")
+    price = data[0]
+
+    expected_amount = plan.monthly_price_pence if interval == "monthly" else plan.annual_price_pence
+    actual_amount = int(_obj_get(price, "unit_amount", 0) or 0)
+    actual_currency = str(_obj_get(price, "currency", "") or "").lower()
+    recurring = _obj_get(price, "recurring", {}) or {}
+    actual_interval = str(_obj_get(recurring, "interval", "") or "").lower()
+    expected_interval = "month" if interval == "monthly" else "year"
+    if actual_amount != expected_amount or actual_currency != settings.billing_currency.lower() or actual_interval != expected_interval:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Stripe price {lookup_key} does not match the FAST {plan.name} {interval} plan "
+                f"({expected_amount / 100:.2f} {settings.billing_currency.upper()}/{expected_interval})."
+            ),
+        )
+    return price
 
 
 def _require_org_admin(user: User) -> int:
@@ -127,7 +184,7 @@ def public_plans(db: Session = Depends(get_db)) -> dict:
     plans = db.scalars(select(SubscriptionPlan).where(SubscriptionPlan.active.is_(True)).order_by(SubscriptionPlan.id)).all()
     return {
         "billing_available": _stripe_ready(),
-        "billing_mode": "test" if str(settings.stripe_secret_key).startswith("sk_test_") else ("live" if _stripe_ready() else "unconfigured"),
+        "billing_mode": "test" if _stripe_secret_key().startswith("sk_test_") else ("live" if _stripe_ready() else "unconfigured"),
         "currency": settings.billing_currency.lower(),
         "plans": [plan_payload(item) for item in plans],
     }
@@ -235,21 +292,13 @@ def create_checkout_session(payload: CheckoutRequest, user: User = Depends(get_c
     if current and current.external_subscription_id and str(current.status).lower() not in {"cancelled", "expired"}:
         raise HTTPException(status_code=409, detail="This organisation already has a Stripe subscription. Use Manage subscription instead.")
 
-    _configure_stripe()
+    price = _stripe_price_for_plan(plan, interval)
     customer_id = current.external_customer_id if current and current.external_customer_id else None
     customer_email = organisation.contact_email or user.email
     metadata = {"fast_organisation_id": str(organisation_id), "fast_plan_id": str(plan.id), "fast_billing_interval": interval}
     params = {
         "mode": "subscription",
-        "line_items": [{
-            "price_data": {
-                "currency": settings.billing_currency.lower(),
-                "unit_amount": amount,
-                "recurring": {"interval": "month" if interval == "monthly" else "year"},
-                "product_data": {"name": f"FAST {plan.name}", "description": plan.description or "FAST Sports Analytics subscription"},
-            },
-            "quantity": 1,
-        }],
+        "line_items": [{"price": str(_obj_get(price, "id")), "quantity": 1}],
         "success_url": f"{settings.public_app_url.rstrip('/')}/pricing?checkout=success",
         "cancel_url": f"{settings.public_app_url.rstrip('/')}/pricing?checkout=cancelled",
         "client_reference_id": str(organisation_id),
@@ -345,7 +394,7 @@ async def stripe_webhook(request: Request) -> dict:
     signature = request.headers.get("stripe-signature", "")
     _configure_stripe()
     try:
-        event = stripe.Webhook.construct_event(payload=payload, sig_header=signature, secret=settings.stripe_webhook_secret)
+        event = stripe.Webhook.construct_event(payload=payload, sig_header=signature, secret=_stripe_webhook_secret())
     except Exception as exc:
         raise HTTPException(status_code=400, detail="Invalid Stripe webhook") from exc
 

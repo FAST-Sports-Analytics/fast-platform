@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Subscriptions · FAST Cloud Admin{% endblock %}
 {% block content %}
-<section class="page-header"><div><h1>Subscription Plans</h1><p>Flexible plan configuration. Prices remain placeholders until billing is connected.</p></div></section>
+<section class="page-header"><div><h1>Subscription Plans</h1><p>FAST plan entitlements and catalogue pricing. Self-service plans use matching Stripe catalogue prices when billing is connected.</p></div></section>
 {% if request.query_params.get('message') %}<div class="alert success">{{ request.query_params.get('message') }}</div>{% endif %}
 {% if request.query_params.get('error') %}<div class="alert error">{{ request.query_params.get('error') }}</div>{% endif %}
 <div class="stats-grid">
