@@ -29,20 +29,31 @@ def seed_catalogue(db: Session) -> None:
             db.add(Sport(key=key, name=name))
     db.flush()
 
+    # Commercial launch defaults. Existing standard plans are kept in sync so
+    # Railway deployments pick up approved FAST pricing without manual DB edits.
     plan_defaults = [
-        {"name": "Starter", "description": "Entry plan for small teams.", "seats": 2, "devices": 2, "products": ["analysis"], "sports": ["football"]},
-        {"name": "Professional", "description": "Configurable multi-product plan.", "seats": 5, "devices": 5, "products": ["analysis", "viewer"], "sports": []},
-        {"name": "Enterprise", "description": "Large organisation plan with advanced platform features.", "seats": 25, "devices": 25, "products": ["analysis", "viewer"], "sports": []},
-        {"name": "Custom", "description": "Individually configured commercial agreement.", "seats": 1, "devices": 1, "products": [], "sports": []},
+        {"name": "Starter", "description": "For individual analysts and developing teams.", "monthly": 3900, "annual": 39000, "seats": 2, "devices": 2, "storage": 25, "products": ["analysis"], "sports": ["football"], "remote": False, "priority": False, "self_service": True},
+        {"name": "Professional", "description": "For clubs and performance departments using connected analysis and review.", "monthly": 8900, "annual": 89000, "seats": 5, "devices": 5, "storage": 100, "products": ["analysis", "viewer"], "sports": [], "remote": True, "priority": True, "self_service": True},
+        # Enterprise is intentionally quote-only: a zero amount must never become a free Stripe checkout.
+        {"name": "Enterprise", "description": "For larger organisations requiring advanced platform features and tailored capacity.", "monthly": 0, "annual": 0, "seats": 25, "devices": 25, "storage": 500, "products": ["analysis", "viewer"], "sports": [], "remote": True, "priority": True, "self_service": False},
+        {"name": "Custom", "description": "Individually configured commercial agreement.", "monthly": 0, "annual": 0, "seats": 1, "devices": 1, "storage": 0, "products": [], "sports": [], "remote": True, "priority": True, "self_service": False},
     ]
     for item in plan_defaults:
-        if not db.scalar(select(SubscriptionPlan).where(SubscriptionPlan.name == item["name"])):
-            db.add(SubscriptionPlan(
-                name=item["name"], description=item["description"], included_seats=item["seats"],
-                max_devices=item["devices"], products_json=json.dumps(item["products"]),
-                sports_json=json.dumps(item["sports"]), monthly_price_pence=0, annual_price_pence=0,
-                features_json=json.dumps({"remote_management": item["name"] in {"Professional", "Enterprise", "Custom"}}),
-            ))
+        plan = db.scalar(select(SubscriptionPlan).where(SubscriptionPlan.name == item["name"]))
+        if not plan:
+            plan = SubscriptionPlan(name=item["name"])
+            db.add(plan)
+        plan.description = item["description"]
+        plan.monthly_price_pence = item["monthly"]
+        plan.annual_price_pence = item["annual"]
+        plan.included_seats = item["seats"]
+        plan.max_devices = item["devices"]
+        plan.cloud_storage_gb = item["storage"]
+        plan.products_json = json.dumps(item["products"])
+        plan.sports_json = json.dumps(item["sports"])
+        plan.features_json = json.dumps({"remote_management": item["remote"], "priority_support": item["priority"]})
+        plan.self_service_upgrades = item["self_service"]
+        plan.active = True
     db.flush()
 
     defaults = [

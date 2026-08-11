@@ -16,12 +16,12 @@ type Plan = {
   cloud_storage_gb: number;
 };
 
-type PlansPayload = { billing_available?: boolean; currency?: string; plans?: Plan[] };
+type PlansPayload = { billing_available?: boolean; billing_mode?: "test" | "live" | "unconfigured"; currency?: string; plans?: Plan[] };
 
 const fallback: Plan[] = [
-  { id: -1, name: "Starter", description: "For individual analysts and developing teams.", monthly_price_pence: 0, annual_price_pence: 0, included_seats: 2, max_devices: 2, products: ["analysis"], sports: ["football"], cloud_storage_gb: 0 },
-  { id: -2, name: "Professional", description: "For clubs and performance departments using connected analysis and review.", monthly_price_pence: 0, annual_price_pence: 0, included_seats: 5, max_devices: 5, products: ["analysis", "viewer"], sports: [], cloud_storage_gb: 0 },
-  { id: -3, name: "Enterprise", description: "For larger organisations that need more users, devices and central control.", monthly_price_pence: 0, annual_price_pence: 0, included_seats: 25, max_devices: 25, products: ["analysis", "viewer"], sports: [], cloud_storage_gb: 0 },
+  { id: -1, name: "Starter", description: "For individual analysts and developing teams.", monthly_price_pence: 3900, annual_price_pence: 39000, included_seats: 2, max_devices: 2, products: ["analysis"], sports: ["football"], cloud_storage_gb: 25 },
+  { id: -2, name: "Professional", description: "For clubs and performance departments using connected analysis and review.", monthly_price_pence: 8900, annual_price_pence: 89000, included_seats: 5, max_devices: 5, products: ["analysis", "viewer"], sports: [], cloud_storage_gb: 100 },
+  { id: -3, name: "Enterprise", description: "For larger organisations that need more users, devices and central control.", monthly_price_pence: 0, annual_price_pence: 0, included_seats: 25, max_devices: 25, products: ["analysis", "viewer"], sports: [], cloud_storage_gb: 500 },
 ];
 
 function apiBase() {
@@ -61,7 +61,7 @@ export function PricingPlans() {
           {featured && <small className="recommended">Recommended</small>}
           <p>FAST {plan.name}</p>
           <h2>{plan.name}</h2>
-          <span className="price">{priced && plan.monthly_price_pence > 0 ? `${money(plan.monthly_price_pence)}/mo` : "Coming soon"}</span>
+          <span className="price">{priced && plan.monthly_price_pence > 0 ? `${money(plan.monthly_price_pence)}/mo` : plan.name.toLowerCase() === "enterprise" ? "Contact us" : "Coming soon"}</span>
           {priced && plan.annual_price_pence > 0 && <p className="tier-for">{money(plan.annual_price_pence)}/year</p>}
           <p className="tier-for">{plan.description}</p>
           <ul>
@@ -71,13 +71,15 @@ export function PricingPlans() {
             {plan.cloud_storage_gb > 0 && <li>{plan.cloud_storage_gb} GB cloud storage</li>}
             <li>{plan.sports.length ? plan.sports.map(s => s.replaceAll("_", " ")).join(", ") : "Configurable sports access"}</li>
           </ul>
-          <Link className={`button ${featured ? "button-primary" : "button-quiet"}`} href="/contact">{priced && payload.billing_available ? "Contact sales" : "Register interest"}</Link>
+          <Link className={`button ${featured ? "button-primary" : "button-quiet"}`} href="/contact">{plan.name.toLowerCase() === "enterprise" ? "Contact sales" : payload.billing_mode === "live" ? "Get started" : "Register interest"}</Link>
         </article>;
       })}
     </div>
     <p className="pricing-note">
-      {loaded && payload.billing_available
-        ? "FAST Billing is connected. Published prices are controlled centrally through FAST Cloud; commercial onboarding is currently assisted."
+      {loaded && payload.billing_mode === "live"
+        ? "FAST Billing is live. Starter is £39/month or £390/year; Professional is £89/month or £890/year. Enterprise is tailored to each organisation."
+        : loaded && payload.billing_mode === "test"
+        ? "FAST Billing is connected in Stripe test mode. Live purchasing will be enabled after final payment testing."
         : "Final subscription pricing will be published before public launch. FAST Cloud already supports plan, seat, device and billing-state management."}
     </p>
   </>;

@@ -49,6 +49,7 @@ class Settings(BaseSettings):
     stripe_secret_key: str = ""
     stripe_webhook_secret: str = ""
     billing_currency: str = "gbp"
+    billing_grace_days: int = 7
 
     model_config = SettingsConfigDict(
         env_file=".env",

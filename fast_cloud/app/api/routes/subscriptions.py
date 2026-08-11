@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -127,6 +127,7 @@ def public_plans(db: Session = Depends(get_db)) -> dict:
     plans = db.scalars(select(SubscriptionPlan).where(SubscriptionPlan.active.is_(True)).order_by(SubscriptionPlan.id)).all()
     return {
         "billing_available": _stripe_ready(),
+        "billing_mode": "test" if str(settings.stripe_secret_key).startswith("sk_test_") else ("live" if _stripe_ready() else "unconfigured"),
         "currency": settings.billing_currency.lower(),
         "plans": [plan_payload(item) for item in plans],
     }
@@ -226,8 +227,8 @@ def create_checkout_session(payload: CheckoutRequest, user: User = Depends(get_c
     if interval not in {"monthly", "annual"}:
         raise HTTPException(status_code=422, detail="Billing interval must be monthly or annual")
     amount = plan.monthly_price_pence if interval == "monthly" else plan.annual_price_pence
-    if amount <= 0:
-        raise HTTPException(status_code=409, detail="This plan does not yet have a self-service price")
+    if amount <= 0 or not bool(plan.self_service_upgrades):
+        raise HTTPException(status_code=409, detail="This plan requires a FAST sales-assisted agreement")
 
     organisation = db.get(Organisation, organisation_id)
     current = db.scalar(select(OrganisationSubscription).where(OrganisationSubscription.organisation_id == organisation_id))
@@ -367,7 +368,8 @@ async def stripe_webhook(request: Request) -> dict:
             if subscription_id:
                 item = db.scalar(select(OrganisationSubscription).where(OrganisationSubscription.external_subscription_id == subscription_id))
                 if item:
-                    item.status = "past_due"
+                    item.status = "grace_period"
+                    item.grace_ends_at = datetime.now(timezone.utc) + timedelta(days=max(1, settings.billing_grace_days))
                     item.updated_at = datetime.now(timezone.utc)
         elif event_type == "invoice.paid":
             subscription_id = str(_obj_get(data, "subscription", "") or "")
@@ -375,6 +377,7 @@ async def stripe_webhook(request: Request) -> dict:
                 item = db.scalar(select(OrganisationSubscription).where(OrganisationSubscription.external_subscription_id == subscription_id))
                 if item and item.status not in {"trial", "cancelled", "expired"}:
                     item.status = "active"
+                    item.grace_ends_at = None
                     item.updated_at = datetime.now(timezone.utc)
         db.commit()
     return {"received": True}
