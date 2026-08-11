@@ -2358,12 +2358,48 @@ def subscriptions_page(request: Request, db: Session = Depends(get_db)):
     admin = require_portal_admin(request, db)
     if not admin.is_admin:
         return RedirectResponse("/admin/my-organisation", status_code=303)
-    from app.models import OrganisationSubscription, SubscriptionPlan
+    from app.core.subscription_access import evaluate_subscription
+    from app.models import BillingWebhookEvent, OrganisationSubscription, SubscriptionPlan
     plans = db.scalars(select(SubscriptionPlan).order_by(SubscriptionPlan.name)).all()
     organisations = db.scalars(select(Organisation).order_by(Organisation.name)).all()
     subscriptions = db.scalars(select(OrganisationSubscription).order_by(OrganisationSubscription.id.desc())).all()
+    recent_webhooks = db.scalars(
+        select(BillingWebhookEvent).order_by(BillingWebhookEvent.id.desc()).limit(60)
+    ).all()
+    latest_by_subscription = {}
+    latest_by_customer = {}
+    for event in recent_webhooks:
+        if event.external_subscription_id and event.external_subscription_id not in latest_by_subscription:
+            latest_by_subscription[event.external_subscription_id] = event
+        if event.external_customer_id and event.external_customer_id not in latest_by_customer:
+            latest_by_customer[event.external_customer_id] = event
+
+    billing_diagnostics = []
+    for item in subscriptions:
+        last_event = latest_by_subscription.get(item.external_subscription_id or "") or latest_by_customer.get(item.external_customer_id or "")
+        access = evaluate_subscription(item)
+        event_type = last_event.event_type if last_event else "No Stripe event recorded"
+        if last_event and last_event.event_type in {"invoice.payment_failed", "invoice.payment_action_required"}:
+            payment_state = "Payment failed / retrying"
+        elif last_event and last_event.event_type in {"invoice.paid", "invoice.payment_succeeded"}:
+            payment_state = "Paid"
+        elif item.status in {"past_due", "grace_period"}:
+            payment_state = "Past due"
+        elif item.billing_provider == "stripe":
+            payment_state = "Current"
+        else:
+            payment_state = "Manual / not connected"
+        billing_diagnostics.append({
+            "item": item,
+            "last_event": last_event,
+            "event_type": event_type,
+            "payment_state": payment_state,
+            "access": access,
+        })
+
     return templates.TemplateResponse(request, "subscriptions.html", {
         "admin": admin, "plans": plans, "organisations": organisations, "subscriptions": subscriptions,
+        "billing_diagnostics": billing_diagnostics, "recent_webhooks": recent_webhooks[:25],
         "active_count": sum(1 for item in subscriptions if item.status == "active"),
         "trial_count": sum(1 for item in subscriptions if item.status == "trial"),
         "risk_count": sum(1 for item in subscriptions if item.status in {"past_due", "grace_period"}),

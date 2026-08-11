@@ -17,7 +17,7 @@ from app.core.email import EmailDeliveryError, branded_action_email, send_email
 from app.core.rate_limit import RateLimit, client_address, limiter
 from app.core.security import generate_licence_code, hash_licence_code, hash_password, normalise_licence_code
 from app.db.session import SessionLocal, get_db
-from app.models import AuditLog, Club, ClubMember, Licence, Organisation, OrganisationSubscription, SubscriptionPlan, User
+from app.models import AuditLog, BillingWebhookEvent, Club, ClubMember, Licence, Organisation, OrganisationSubscription, SubscriptionPlan, User
 
 try:
     import stripe
@@ -569,6 +569,142 @@ def create_portal_session(user: User = Depends(get_current_user), db: Session = 
     return {"url": _obj_get(session, "url")}
 
 
+
+def _invoice_subscription_id(invoice) -> str:
+    """Return the subscription ID from both legacy and current Stripe invoice shapes.
+
+    Older Stripe API versions exposed ``invoice.subscription`` directly. Newer
+    versions expose the generating subscription through
+    ``invoice.parent.subscription_details.subscription``. Supporting both keeps
+    payment-failure/recovery handling stable across Stripe API upgrades.
+    """
+    direct = str(_obj_get(invoice, "subscription", "") or "").strip()
+    if direct:
+        return direct
+    parent = _obj_get(invoice, "parent", {}) or {}
+    subscription_details = _obj_get(parent, "subscription_details", {}) or {}
+    nested = _obj_get(subscription_details, "subscription", "")
+    if nested:
+        return str(_obj_get(nested, "id", nested) or "").strip()
+    return ""
+
+
+def _stripe_customer_id(value) -> str:
+    customer = _obj_get(value, "customer", "")
+    return str(_obj_get(customer, "id", customer) or "").strip()
+
+
+def _subscription_for_stripe_reference(
+    db: Session,
+    *,
+    subscription_id: str = "",
+    customer_id: str = "",
+) -> OrganisationSubscription | None:
+    if subscription_id:
+        item = db.scalar(
+            select(OrganisationSubscription).where(
+                OrganisationSubscription.external_subscription_id == subscription_id
+            )
+        )
+        if item:
+            return item
+    if customer_id:
+        # A FAST organisation has one commercial subscription. Customer-ID
+        # fallback protects invoice processing when Stripe changes where the
+        # subscription reference is represented in an event payload.
+        return db.scalar(
+            select(OrganisationSubscription).where(
+                OrganisationSubscription.external_customer_id == customer_id
+            )
+        )
+    return None
+
+
+def _record_billing_webhook_event(
+    db: Session,
+    event,
+    data,
+    *,
+    item: OrganisationSubscription | None,
+    processing_status: str,
+    details: str,
+    subscription_id: str = "",
+) -> None:
+    event_id = str(_obj_get(event, "id", "") or "").strip() or None
+    event_type = str(_obj_get(event, "type", "") or "unknown")
+    customer_id = _stripe_customer_id(data) or None
+    if event_type.startswith("customer.subscription."):
+        resolved_subscription_id = subscription_id or str(_obj_get(data, "id", "") or "")
+    else:
+        resolved_subscription_id = subscription_id or _invoice_subscription_id(data)
+    if event_id:
+        row = db.scalar(select(BillingWebhookEvent).where(BillingWebhookEvent.external_event_id == event_id))
+    else:
+        row = None
+    if row is None:
+        row = BillingWebhookEvent(provider="stripe", external_event_id=event_id, event_type=event_type)
+        db.add(row)
+    row.event_type = event_type
+    row.external_customer_id = customer_id
+    row.external_subscription_id = resolved_subscription_id or None
+    row.organisation_id = item.organisation_id if item else None
+    row.matched = item is not None
+    row.processing_status = processing_status
+    row.details = details[:2000]
+
+
+def _apply_payment_failure(db: Session, invoice) -> OrganisationSubscription | None:
+    subscription_id = _invoice_subscription_id(invoice)
+    customer_id = _stripe_customer_id(invoice)
+    item = _subscription_for_stripe_reference(
+        db, subscription_id=subscription_id, customer_id=customer_id
+    )
+    if not item:
+        return None
+
+    # Refresh the subscription first so period dates/cancellation state remain
+    # current even when the failure event arrives before subscription.updated.
+    if subscription_id and _stripe_ready():
+        try:
+            _configure_stripe()
+            remote = stripe.Subscription.retrieve(subscription_id)
+            _sync_stripe_subscription(db, remote)
+        except Exception:
+            # The invoice failure itself is still authoritative enough to place
+            # an already-matched FAST subscription into grace.
+            pass
+
+    item.status = "grace_period"
+    now = datetime.now(timezone.utc)
+    grace_candidate = now + timedelta(days=max(1, settings.billing_grace_days))
+    # Never shorten an existing grace window on Smart Retry attempts.
+    if not item.grace_ends_at or item.grace_ends_at < grace_candidate:
+        item.grace_ends_at = grace_candidate
+    item.updated_at = now
+    return item
+
+
+def _apply_payment_recovery(db: Session, invoice) -> OrganisationSubscription | None:
+    subscription_id = _invoice_subscription_id(invoice)
+    customer_id = _stripe_customer_id(invoice)
+    item = _subscription_for_stripe_reference(
+        db, subscription_id=subscription_id, customer_id=customer_id
+    )
+    if not item:
+        return None
+    if subscription_id and _stripe_ready():
+        try:
+            _configure_stripe()
+            remote = stripe.Subscription.retrieve(subscription_id)
+            _sync_stripe_subscription(db, remote)
+        except Exception:
+            pass
+    if item.status not in {"trial", "cancelled", "expired"}:
+        item.status = "active"
+        item.grace_ends_at = None
+        item.updated_at = datetime.now(timezone.utc)
+    return item
+
 def _stripe_datetime(value) -> datetime | None:
     try:
         return datetime.fromtimestamp(int(value), tz=timezone.utc) if value else None
@@ -693,7 +829,15 @@ def _sync_stripe_subscription(db: Session, subscription) -> None:
     if effective_plan is None and item.plan_id:
         effective_plan = db.get(SubscriptionPlan, int(item.plan_id))
 
-    item.status = _map_stripe_status(_obj_get(subscription, "status"))
+    mapped_status = _map_stripe_status(_obj_get(subscription, "status"))
+    if mapped_status == "past_due":
+        item.status = "grace_period"
+        if not item.grace_ends_at:
+            item.grace_ends_at = datetime.now(timezone.utc) + timedelta(days=max(1, settings.billing_grace_days))
+    else:
+        item.status = mapped_status
+        if mapped_status in {"active", "trial"}:
+            item.grace_ends_at = None
     item.billing_interval = str(_obj_get(metadata, "fast_billing_interval", item.billing_interval or "monthly"))
     item.billing_provider = "stripe"
     item.external_customer_id = str(_obj_get(subscription, "customer", "") or item.external_customer_id or "") or None
@@ -731,36 +875,96 @@ async def stripe_webhook(request: Request) -> dict:
     event_type = str(_obj_get(event, "type", ""))
     data = _obj_get(_obj_get(event, "data", {}), "object", {})
     with SessionLocal() as db:
-        if event_type == "checkout.session.completed":
-            subscription_id = _obj_get(data, "subscription")
-            if subscription_id:
-                try:
+        matched_item = None
+        processing_status = "processed"
+        details = "Stripe webhook processed."
+        referenced_subscription_id = ""
+        try:
+            if event_type == "checkout.session.completed":
+                subscription_id = str(_obj_get(data, "subscription", "") or "")
+                referenced_subscription_id = subscription_id
+                if subscription_id:
                     subscription = stripe.Subscription.retrieve(subscription_id)
                     session_metadata = _obj_get(data, "metadata", {}) or {}
                     if str(_obj_get(session_metadata, "fast_public_checkout", "")) == "1":
                         _provision_public_checkout(db, data, subscription)
                     else:
                         _sync_stripe_subscription(db, subscription)
-                except Exception:
-                    db.rollback()
-                    raise
-        elif event_type in {"customer.subscription.created", "customer.subscription.updated", "customer.subscription.deleted"}:
-            _sync_stripe_subscription(db, data)
-        elif event_type in {"invoice.payment_failed", "invoice.payment_action_required"}:
-            subscription_id = str(_obj_get(data, "subscription", "") or "")
-            if subscription_id:
-                item = db.scalar(select(OrganisationSubscription).where(OrganisationSubscription.external_subscription_id == subscription_id))
-                if item:
-                    item.status = "grace_period"
-                    item.grace_ends_at = datetime.now(timezone.utc) + timedelta(days=max(1, settings.billing_grace_days))
-                    item.updated_at = datetime.now(timezone.utc)
-        elif event_type == "invoice.paid":
-            subscription_id = str(_obj_get(data, "subscription", "") or "")
-            if subscription_id:
-                item = db.scalar(select(OrganisationSubscription).where(OrganisationSubscription.external_subscription_id == subscription_id))
-                if item and item.status not in {"trial", "cancelled", "expired"}:
-                    item.status = "active"
-                    item.grace_ends_at = None
-                    item.updated_at = datetime.now(timezone.utc)
-        db.commit()
+                    matched_item = _subscription_for_stripe_reference(
+                        db,
+                        subscription_id=subscription_id,
+                        customer_id=_stripe_customer_id(subscription),
+                    )
+                    details = "Checkout completed and FAST subscription synchronised."
+                else:
+                    processing_status = "ignored"
+                    details = "Checkout completed without a subscription reference."
+            elif event_type in {"customer.subscription.created", "customer.subscription.updated", "customer.subscription.deleted"}:
+                referenced_subscription_id = str(_obj_get(data, "id", "") or "")
+                _sync_stripe_subscription(db, data)
+                matched_item = _subscription_for_stripe_reference(
+                    db,
+                    subscription_id=referenced_subscription_id,
+                    customer_id=_stripe_customer_id(data),
+                )
+                if matched_item:
+                    details = f"Subscription state synchronised to {matched_item.status}."
+                else:
+                    processing_status = "unmatched"
+                    details = "Stripe subscription is not mapped to a FAST organisation."
+            elif event_type in {"invoice.payment_failed", "invoice.payment_action_required"}:
+                referenced_subscription_id = _invoice_subscription_id(data)
+                matched_item = _apply_payment_failure(db, data)
+                if matched_item:
+                    details = (
+                        f"Payment failure applied; FAST access remains available during grace until "
+                        f"{matched_item.grace_ends_at.isoformat() if matched_item.grace_ends_at else 'not set'}."
+                    )
+                else:
+                    processing_status = "unmatched"
+                    details = (
+                        "Payment failure received but no FAST subscription matched the Stripe "
+                        f"subscription/customer reference (subscription={referenced_subscription_id or 'none'}, "
+                        f"customer={_stripe_customer_id(data) or 'none'})."
+                    )
+            elif event_type in {"invoice.paid", "invoice.payment_succeeded"}:
+                referenced_subscription_id = _invoice_subscription_id(data)
+                matched_item = _apply_payment_recovery(db, data)
+                if matched_item:
+                    details = "Invoice paid; FAST subscription restored to active and grace cleared."
+                else:
+                    processing_status = "unmatched"
+                    details = "Paid invoice received but no FAST subscription matched the Stripe references."
+            else:
+                processing_status = "ignored"
+                details = "Event type is not used by FAST subscription lifecycle handling."
+
+            _record_billing_webhook_event(
+                db,
+                event,
+                data,
+                item=matched_item,
+                processing_status=processing_status,
+                details=details,
+                subscription_id=referenced_subscription_id,
+            )
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            # Persist a diagnostic row in a clean transaction where possible,
+            # then return a non-2xx response so Stripe retries transient errors.
+            try:
+                _record_billing_webhook_event(
+                    db,
+                    event,
+                    data,
+                    item=matched_item,
+                    processing_status="error",
+                    details=f"Webhook processing error: {type(exc).__name__}: {exc}",
+                    subscription_id=referenced_subscription_id,
+                )
+                db.commit()
+            except Exception:
+                db.rollback()
+            raise
     return {"received": True}

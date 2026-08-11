@@ -1,5 +1,6 @@
 from app.models.entities import (
     AuditLog,
+    BillingWebhookEvent,
     Club,
     ClubMember,
     CrashReport,
@@ -18,6 +19,6 @@ from app.models.entities import (
 )
 
 __all__ = [
-    "AuditLog", "CrashReport", "User", "Club", "ClubMember", "Licence", "DeviceActivation", "DeviceAuditLog",
+    "AuditLog", "BillingWebhookEvent", "CrashReport", "User", "Club", "ClubMember", "Licence", "DeviceActivation", "DeviceAuditLog",
     "LicenceTemplate", "Product", "Sport", "SubscriptionPlan", "OrganisationSubscription", "Organisation", "Release", "RemoteCommand",
 ]
