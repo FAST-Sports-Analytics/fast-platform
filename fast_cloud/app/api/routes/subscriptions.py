@@ -681,8 +681,18 @@ def _sync_stripe_subscription(db: Session, subscription) -> None:
     if not item:
         item = OrganisationSubscription(organisation_id=organisation.id)
         db.add(item)
-    if plan_id.isdigit() and db.get(SubscriptionPlan, int(plan_id)):
-        item.plan_id = int(plan_id)
+    # Resolve the plan explicitly instead of relying on ``item.plan`` being
+    # refreshed after assigning plan_id.  During first-checkout provisioning
+    # the OrganisationSubscription row has only just been flushed, and the
+    # relationship can otherwise still read as None in this transaction.
+    effective_plan = None
+    if plan_id.isdigit():
+        effective_plan = db.get(SubscriptionPlan, int(plan_id))
+        if effective_plan:
+            item.plan_id = effective_plan.id
+    if effective_plan is None and item.plan_id:
+        effective_plan = db.get(SubscriptionPlan, int(item.plan_id))
+
     item.status = _map_stripe_status(_obj_get(subscription, "status"))
     item.billing_interval = str(_obj_get(metadata, "fast_billing_interval", item.billing_interval or "monthly"))
     item.billing_provider = "stripe"
@@ -692,10 +702,18 @@ def _sync_stripe_subscription(db: Session, subscription) -> None:
     item.current_period_ends_at = _subscription_period_end(subscription)
     item.cancel_at_period_end = bool(_obj_get(subscription, "cancel_at_period_end", False))
     item.updated_at = datetime.now(timezone.utc)
-    if item.plan:
-        organisation.subscription_tier = item.plan.name
-        organisation.max_seats = item.seat_override or item.plan.included_seats
-        _ensure_subscription_entitlements(db, organisation, item.plan)
+    if effective_plan:
+        organisation.subscription_tier = effective_plan.name
+        organisation.max_seats = item.seat_override or effective_plan.included_seats
+        # Keep the organisation/admin UI and the licence-backed desktop access
+        # in lock-step with Stripe on every subscription sync.  This also makes
+        # a resent webhook repair organisations created by older deployments.
+        organisation.expires_at = item.current_period_ends_at
+        _ensure_subscription_entitlements(db, organisation, effective_plan)
+        for club in organisation.clubs:
+            for licence in club.licences:
+                if licence.status == "active":
+                    licence.expires_at = item.current_period_ends_at
 
 
 @router.post("/webhooks/stripe")
