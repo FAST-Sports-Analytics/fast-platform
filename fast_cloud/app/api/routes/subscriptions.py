@@ -908,7 +908,20 @@ async def stripe_webhook(request: Request) -> dict:
                     customer_id=_stripe_customer_id(data),
                 )
                 if matched_item:
-                    details = f"Subscription state synchronised to {matched_item.status}."
+                    if event_type == "customer.subscription.deleted":
+                        # A deleted Stripe subscription is terminal: the paid period has
+                        # already ended (or the subscription was cancelled immediately).
+                        # Do not retain the previous current_period_end here, otherwise
+                        # the access evaluator can incorrectly interpret a final deletion
+                        # as "cancelled pending" and keep FAST applications enabled.
+                        matched_item.status = "cancelled"
+                        matched_item.cancel_at_period_end = False
+                        matched_item.current_period_ends_at = None
+                        matched_item.grace_ends_at = None
+                        matched_item.updated_at = datetime.now(timezone.utc)
+                        details = "Stripe subscription deleted; FAST access is cancelled immediately."
+                    else:
+                        details = f"Subscription state synchronised to {matched_item.status}."
                 else:
                     processing_status = "unmatched"
                     details = "Stripe subscription is not mapped to a FAST organisation."
