@@ -45,6 +45,11 @@ class Settings(BaseSettings):
     smtp_starttls: bool = True
     smtp_ssl: bool = False
 
+    # Stripe Billing (optional until commercial launch)
+    stripe_secret_key: str = ""
+    stripe_webhook_secret: str = ""
+    billing_currency: str = "gbp"
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_prefix="FAST_CLOUD_",
