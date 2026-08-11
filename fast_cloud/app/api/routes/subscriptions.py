@@ -15,9 +15,9 @@ from app.api.deps import get_current_user
 from app.core.config import get_settings
 from app.core.email import EmailDeliveryError, branded_action_email, send_email
 from app.core.rate_limit import RateLimit, client_address, limiter
-from app.core.security import hash_password
+from app.core.security import generate_licence_code, hash_licence_code, hash_password, normalise_licence_code
 from app.db.session import SessionLocal, get_db
-from app.models import AuditLog, Organisation, OrganisationSubscription, SubscriptionPlan, User
+from app.models import AuditLog, Club, ClubMember, Licence, Organisation, OrganisationSubscription, SubscriptionPlan, User
 
 try:
     import stripe
@@ -590,6 +590,84 @@ def _map_stripe_status(value: str | None) -> str:
     }.get(status, "active")
 
 
+def _subscription_period_end(subscription) -> datetime | None:
+    # Stripe API versions can expose the billing period on the subscription
+    # itself or on the first subscription item. Support both shapes.
+    direct = _stripe_datetime(_obj_get(subscription, "current_period_end"))
+    if direct:
+        return direct
+    items = _obj_get(_obj_get(subscription, "items", {}), "data", []) or []
+    if items:
+        return _stripe_datetime(_obj_get(items[0], "current_period_end"))
+    return None
+
+
+def _ensure_subscription_entitlements(db: Session, organisation: Organisation, plan: SubscriptionPlan) -> None:
+    """Materialise plan entitlements as the organisation's managed club licence.
+
+    Desktop authentication/device activation is licence-backed, so a paid
+    subscription must create/update that licence rather than only changing the
+    subscription row. This helper is idempotent and also repairs subscriptions
+    created before subscription-backed provisioning was added.
+    """
+    products = _loads(plan.products_json, [])
+    plan_sports = _loads(plan.sports_json, [])
+    selected_sports = plan_sports or _loads(organisation.sports_json, [])
+
+    organisation.subscription_tier = plan.name
+    organisation.max_seats = max(1, int(plan.included_seats or 1))
+    organisation.sports_json = json.dumps(selected_sports)
+
+    club = db.scalar(select(Club).where(Club.organisation_id == organisation.id).order_by(Club.id))
+    if not club:
+        base_name = organisation.name.strip() or f"Organisation {organisation.id}"
+        club_name = base_name
+        suffix = 2
+        while db.scalar(select(Club).where(func.lower(Club.name) == club_name.lower())):
+            club_name = f"{base_name} {suffix}"
+            suffix += 1
+        club = Club(name=club_name, organisation_id=organisation.id, status="active")
+        db.add(club)
+        db.flush()
+
+    licence = db.scalar(
+        select(Licence).where(Licence.club_id == club.id, Licence.owner_type == "club").order_by(Licence.id.desc())
+    )
+    if not licence:
+        code = generate_licence_code(plan.name)
+        licence = Licence(
+            code_hash=hash_licence_code(code),
+            code_last_four=normalise_licence_code(code)[-4:],
+            tier=plan.name,
+            owner_type="club",
+            club_id=club.id,
+            status="active",
+            activated_at=datetime.now(timezone.utc),
+        )
+        db.add(licence)
+
+    licence.tier = plan.name
+    licence.products_json = json.dumps(products)
+    licence.sports_json = json.dumps(selected_sports)
+    licence.features_json = plan.features_json or "{}"
+    licence.max_devices = max(1, int(plan.max_devices or 1))
+    licence.max_users = max(1, int(plan.included_seats or 1))
+    licence.status = "active"
+    licence.renewable = True
+
+    # Keep organisation users inside the subscription envelope. Their explicit
+    # assignment can narrow access later, but a newly provisioned administrator
+    # must receive the plan products/sports immediately.
+    users = db.scalars(select(User).where(User.organisation_id == organisation.id)).all()
+    for user in users:
+        if str(user.role or "").lower() == "administrator":
+            user.products_json = json.dumps(products)
+            user.sports_json = json.dumps(selected_sports)
+        membership = db.scalar(select(ClubMember).where(ClubMember.club_id == club.id, ClubMember.user_id == user.id))
+        if not membership:
+            db.add(ClubMember(club_id=club.id, user_id=user.id, role=str(user.role or "analyst").lower()))
+
+
 def _sync_stripe_subscription(db: Session, subscription) -> None:
     metadata = _obj_get(subscription, "metadata", {}) or {}
     organisation_id = str(_obj_get(metadata, "fast_organisation_id", "") or "")
@@ -611,12 +689,13 @@ def _sync_stripe_subscription(db: Session, subscription) -> None:
     item.external_customer_id = str(_obj_get(subscription, "customer", "") or item.external_customer_id or "") or None
     item.external_subscription_id = str(_obj_get(subscription, "id", "") or item.external_subscription_id or "") or None
     item.trial_ends_at = _stripe_datetime(_obj_get(subscription, "trial_end"))
-    item.current_period_ends_at = _stripe_datetime(_obj_get(subscription, "current_period_end"))
+    item.current_period_ends_at = _subscription_period_end(subscription)
     item.cancel_at_period_end = bool(_obj_get(subscription, "cancel_at_period_end", False))
     item.updated_at = datetime.now(timezone.utc)
     if item.plan:
         organisation.subscription_tier = item.plan.name
         organisation.max_seats = item.seat_override or item.plan.included_seats
+        _ensure_subscription_entitlements(db, organisation, item.plan)
 
 
 @router.post("/webhooks/stripe")
