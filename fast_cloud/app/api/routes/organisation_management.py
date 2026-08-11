@@ -209,13 +209,13 @@ def _overview(db: Session, organisation_id: int) -> dict:
     active_devices = sum(1 for item in devices if item.active)
     subscription = subscription_payload(db, organisation_id)
     plan = subscription.get("plan") or {}
-    max_devices = int(plan.get("max_devices") or 0)
-    seat_limit = effective_user_seat_limit(db, organisation)
+    max_devices = int(subscription.get("device_limit") or plan.get("max_devices") or 0)
+    seat_limit = int(subscription.get("seat_limit") or effective_user_seat_limit(db, organisation))
     subscription_status = str(subscription.get("status") or "unconfigured").lower()
     health_checks = [
         {"key": "subscription", "ok": subscription_status in {"active", "trial"}, "label": "Subscription", "detail": subscription.get("display_status") or "Plan not configured"},
-        {"key": "seats", "ok": not seat_limit or allocated_users < seat_limit, "label": "User seats", "detail": f"{allocated_users} of {seat_limit} allocated" if seat_limit else f"{allocated_users} allocated"},
-        {"key": "devices", "ok": not max_devices or active_devices < max_devices, "label": "Device allocation", "detail": f"{active_devices} of {max_devices} active" if max_devices else f"{active_devices} active"},
+        {"key": "seats", "ok": not seat_limit or allocated_users <= seat_limit, "label": "User seats", "detail": (f"{allocated_users} of {seat_limit} allocated" + (f" — {allocated_users - seat_limit} over limit" if seat_limit and allocated_users > seat_limit else "")) if seat_limit else f"{allocated_users} allocated"},
+        {"key": "devices", "ok": not max_devices or active_devices <= max_devices, "label": "Device allocation", "detail": (f"{active_devices} of {max_devices} active" + (f" — {active_devices - max_devices} over limit" if max_devices and active_devices > max_devices else "")) if max_devices else f"{active_devices} active"},
         {"key": "licence", "ok": bool(products or sports), "label": "Licence entitlements", "detail": f"{len(products)} products and {len(sports)} sports enabled"},
         {"key": "sync", "ok": any(item.last_validated_at for item in devices), "label": "Cloud sync", "detail": "Device telemetry received" if any(item.last_validated_at for item in devices) else "No device telemetry received"},
     ]
@@ -520,7 +520,7 @@ def reactivate_device(device_id: int, user: User = Depends(get_current_user), db
     organisation = db.get(Organisation, organisation_id)
     subscription = subscription_payload(db, organisation_id)
     plan = subscription.get("plan") or {}
-    max_devices = int(plan.get("max_devices") or 0)
+    max_devices = int(subscription.get("device_limit") or plan.get("max_devices") or 0)
     active_devices = db.scalar(
         select(func.count(DeviceActivation.id))
         .join(Licence).join(Club)

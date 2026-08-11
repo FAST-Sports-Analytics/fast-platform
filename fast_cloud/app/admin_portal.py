@@ -349,6 +349,15 @@ def create_user(
         error = "The temporary password must be at least 8 characters."
     elif db.scalar(select(User).where(func.lower(User.email) == clean_email)):
         error = "An account already exists for that email address."
+    if not error and club_id:
+        selected_club = db.get(Club, int(club_id)) if club_id.isdigit() else None
+        if selected_club and selected_club.organisation_id:
+            organisation = db.get(Organisation, selected_club.organisation_id)
+            if organisation:
+                used = allocated_user_count(db, organisation.id)
+                seat_limit = effective_user_seat_limit(db, organisation)
+                if used >= seat_limit:
+                    error = f"{organisation.name} is at or over its licensed user-seat limit ({used}/{seat_limit}). Reduce usage or increase the paid quantity before adding another user."
     if error:
         return templates.TemplateResponse(request, "user_form.html", {
             "admin": admin, "clubs": clubs, "licences": licences, "error": error, "values": values
@@ -564,6 +573,17 @@ def edit_user(
         return RedirectResponse(f"/admin/users/{user_id}?error=Enter+a+unique+valid+email+address.", status_code=303)
     user.full_name = full_name.strip() or None
     user.email = clean_email
+    selected_club = db.get(Club, int(club_id)) if club_id.isdigit() else None
+    if selected_club and selected_club.organisation_id:
+        organisation = db.get(Organisation, selected_club.organisation_id)
+        if organisation and user_would_consume_new_seat(db, organisation.id, user.id):
+            used = allocated_user_count(db, organisation.id)
+            seat_limit = effective_user_seat_limit(db, organisation)
+            if used >= seat_limit:
+                return RedirectResponse(
+                    f"/admin/users/{user_id}?error=The+target+organisation+is+at+or+over+its+licensed+user-seat+limit.",
+                    status_code=303,
+                )
     for membership in list(user.club_memberships):
         db.delete(membership)
     if club_id:
@@ -2403,12 +2423,26 @@ def subscriptions_page(request: Request, db: Session = Depends(get_db)):
             payment_state = "Current"
         else:
             payment_state = "Manual / not connected"
+        seat_limit = effective_user_seat_limit(db, item.organisation)
+        seats_used = allocated_user_count(db, item.organisation_id)
+        device_limit = organisation_device_capacity(item.organisation)
+        active_devices = db.scalar(
+            select(func.count(DeviceActivation.id))
+            .join(Licence).join(Club)
+            .where(Club.organisation_id == item.organisation_id, DeviceActivation.active.is_(True))
+        ) or 0
         billing_diagnostics.append({
             "item": item,
             "last_event": last_event,
             "event_type": event_type,
             "payment_state": payment_state,
             "access": access,
+            "seat_limit": seat_limit,
+            "seats_used": seats_used,
+            "seat_over_by": max(0, seats_used - seat_limit),
+            "device_limit": device_limit,
+            "devices_used": active_devices,
+            "device_over_by": max(0, active_devices - device_limit) if device_limit else 0,
         })
 
     return templates.TemplateResponse(request, "subscriptions.html", {

@@ -308,11 +308,38 @@ def subscription_payload(db: Session, organisation_id: int) -> dict:
             "billing_ready": False,
             "provider_available": _stripe_ready(),
             "can_manage_billing": False,
+            "seat_limit": None,
+            "seats_used": 0,
+            "seat_over_limit": False,
+            "seat_over_by": 0,
+            "device_limit": None,
         }
     status = str(item.status or "unconfigured").lower()
     period_value = item.trial_ends_at if status == "trial" else item.current_period_ends_at
     period_label = "Trial ends" if status == "trial" else ("Access ends" if item.cancel_at_period_end else "Renews")
     billing_ready = bool(item.billing_provider == "stripe" and item.external_customer_id and _stripe_ready())
+
+    # Stripe quantity scales plan capacity. ``seat_override`` stores the paid
+    # user capacity after each Stripe sync; derive the matching device capacity
+    # from the plan's base bundle so all API/UI checks use the same allowance.
+    effective_plan = plan_payload(item.plan)
+    seat_limit = None
+    device_limit = None
+    if item.plan:
+        base_seats = max(1, int(item.plan.included_seats or 1))
+        base_devices = max(1, int(item.plan.max_devices or 1))
+        seat_limit = max(1, int(item.seat_override or base_seats))
+        quantity = max(1, (seat_limit + base_seats - 1) // base_seats)
+        device_limit = base_devices * quantity
+        if effective_plan:
+            effective_plan = dict(effective_plan)
+            effective_plan["included_seats"] = seat_limit
+            effective_plan["max_devices"] = device_limit
+
+    from app.core.seats import allocated_user_count
+    seats_used = allocated_user_count(db, organisation_id)
+    seat_over_by = max(0, seats_used - int(seat_limit or 0)) if seat_limit else 0
+
     return {
         "id": item.id,
         "status": item.status,
@@ -329,9 +356,13 @@ def subscription_payload(db: Session, organisation_id: int) -> dict:
         "grace_ends_at": item.grace_ends_at.isoformat() if item.grace_ends_at else None,
         "billing_provider": item.billing_provider,
         "seat_override": item.seat_override,
-        "plan": plan_payload(item.plan),
+        "seat_limit": seat_limit,
+        "seats_used": seats_used,
+        "seat_over_limit": bool(seat_over_by),
+        "seat_over_by": seat_over_by,
+        "device_limit": device_limit,
+        "plan": effective_plan,
     }
-
 
 @router.get("/current")
 def current_subscription(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
