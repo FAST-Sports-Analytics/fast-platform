@@ -8,7 +8,7 @@ from typing import Any, Iterator
 
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
@@ -142,12 +142,24 @@ def update_manifest(
     if effective_ring not in DEPLOYMENT_RINGS:
         effective_ring = "production"
     licensed_components = _licensed_components(user, device)
+    # Release rows created by older FAST Cloud builds may contain the display
+    # value ``alpha`` instead of the canonical database value ``internal``,
+    # mixed-case deployment-ring values, or a NULL ring.  The Admin portal
+    # normalises those values for display, which can otherwise make a release
+    # look eligible while the Launcher manifest silently excludes it.
+    channel_aliases = {channel}
+    if channel == "internal":
+        channel_aliases.add("alpha")
+
     releases = db.scalars(
         select(Release)
         .where(
-            Release.channel == channel,
-            Release.deployment_ring == effective_ring,
-            Release.status == "published",
+            func.lower(Release.channel).in_(channel_aliases),
+            or_(
+                func.lower(Release.deployment_ring) == effective_ring,
+                Release.deployment_ring.is_(None),
+            ),
+            func.lower(Release.status) == "published",
             Release.package_filename.is_not(None),
             Release.package_sha256.is_not(None),
         )
