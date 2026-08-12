@@ -1628,14 +1628,14 @@ async def restore_release_package(
 
     expected_name = Path(item.package_filename).name
     final_path = RELEASE_PACKAGES_DIR / expected_name
-    if final_path.is_file():
-        return RedirectResponse("/admin/releases?error=The+published+package+already+exists.+Recovery+was+not+needed.", status_code=303)
+    package_existed = final_path.is_file()
 
     RELEASE_PACKAGES_DIR.mkdir(parents=True, exist_ok=True)
     temporary = RELEASE_PACKAGES_DIR / f".{expected_name}.restoring"
     digest = hashlib.sha256()
     size = 0
     try:
+        temporary.unlink(missing_ok=True)
         with temporary.open("wb") as output:
             while chunk := await package.read(1024 * 1024):
                 size += len(chunk)
@@ -1643,8 +1643,11 @@ async def restore_release_package(
                     raise ValueError("The release package exceeds the 2 GB upload limit.")
                 digest.update(chunk)
                 output.write(chunk)
+        # Validate the incoming artifact before touching the currently published
+        # package. os.replace() then performs an atomic swap on the same volume,
+        # so a failed upload/validation can never leave the release half-written.
         _validate_release_zip(temporary)
-        temporary.replace(final_path)
+        os.replace(temporary, final_path)
     except (OSError, ValueError) as exc:
         temporary.unlink(missing_ok=True)
         return RedirectResponse(f"/admin/releases?error={str(exc).replace(' ', '+')}", status_code=303)
@@ -1655,14 +1658,22 @@ async def restore_release_package(
     item.package_sha256 = digest.hexdigest()
     item.package_size = size
     item.updated_at = datetime.now(timezone.utc)
-    integrity_note = "checksum matched the release record" if previous_sha256 == item.package_sha256 else "checksum metadata refreshed from the restored ZIP"
+    checksum_changed = bool(previous_sha256 and previous_sha256 != item.package_sha256)
+    action = "package_replaced" if package_existed else "package_recovered"
+    verb = "Replaced" if package_existed else "Recovered"
+    integrity_note = (
+        "checksum changed; release integrity metadata updated to the verified replacement"
+        if checksum_changed
+        else "checksum matched the existing release record"
+    )
     _record_audit(
-        db, admin, "package_recovered", "release", target_type="release", target_id=item.id,
+        db, admin, action, "release", target_type="release", target_id=item.id,
         target_label=f"{item.component} {item.version}",
-        details=f"Recovered missing package {expected_name} ({_format_bytes(size)}; SHA-256 {item.package_sha256}); {integrity_note}.",
+        details=f"{verb} published package {expected_name} ({_format_bytes(size)}; SHA-256 {item.package_sha256}); {integrity_note}.",
     )
     db.commit()
-    return RedirectResponse("/admin/releases?message=Published+release+package+restored+and+verified.", status_code=303)
+    message = "Published+release+package+replaced+and+verified." if package_existed else "Published+release+package+restored+and+verified."
+    return RedirectResponse(f"/admin/releases?message={message}", status_code=303)
 
 
 @router.post("/releases/{release_id}/package/delete")

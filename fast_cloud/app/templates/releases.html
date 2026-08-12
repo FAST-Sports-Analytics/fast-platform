@@ -118,9 +118,9 @@
             <form method="post" action="/admin/releases/{{ item.id }}/delete" onsubmit="return confirm('Permanently delete this release record?')"><button class="danger" type="submit">Delete</button></form>
           {% elif item.status == 'published' %}
             {% if item.package_filename %}
-            <form class="package-upload" method="post" enctype="multipart/form-data" action="/admin/releases/{{ item.id }}/package/restore" onsubmit="return confirm('Restore or verify the ZIP for this published release? The release status, channel, ring and rollout will not change.')">
+            <form class="package-upload" method="post" enctype="multipart/form-data" action="/admin/releases/{{ item.id }}/package/restore" onsubmit="return confirm('Restore or replace the ZIP for this published release? The uploaded ZIP will be verified first. Release status, channel, ring and rollout will not change.')">
               <input type="file" name="package" accept=".zip,application/zip" required>
-              <button class="primary" type="submit">Restore / verify ZIP</button>
+              <button class="primary" type="submit">Restore / replace ZIP</button>
             </form>
             {% endif %}
             <details class="inline-editor"><summary>Progressive rollout</summary><form method="post" action="/admin/releases/{{ item.id }}/rollout"><label>Rollout percentage<select name="rollout_percentage">{% for pct in [1,5,10,25,50,100] %}<option value="{{ pct }}" {% if (item.rollout_percentage or 100) == pct %}selected{% endif %}>{{ pct }}%</option>{% endfor %}</select></label><label>Status<select name="rollout_action"><option value="active" {% if (item.rollout_status or 'active') == 'active' %}selected{% endif %}>Active</option><option value="paused" {% if item.rollout_status == 'paused' %}selected{% endif %}>Paused</option><option value="stopped" {% if item.rollout_status == 'stopped' %}selected{% endif %}>Emergency stop</option></select></label><input name="rollout_notes" value="{{ item.rollout_notes or '' }}" placeholder="Rollout notes"><button class="primary" type="submit">Save rollout</button></form></details>
