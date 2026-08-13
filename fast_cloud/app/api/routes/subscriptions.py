@@ -346,8 +346,36 @@ def plan_payload(plan: SubscriptionPlan | None) -> dict | None:
     }
 
 
-def subscription_payload(db: Session, organisation_id: int) -> dict:
+def subscription_payload(db: Session, organisation_id: int, *, refresh_provider: bool = False) -> dict:
     item = db.scalar(select(OrganisationSubscription).where(OrganisationSubscription.organisation_id == organisation_id))
+    if (
+        refresh_provider
+        and item
+        and item.billing_provider == "stripe"
+        and item.external_subscription_id
+        and _stripe_ready()
+    ):
+        # Organisation Management is an explicit customer/admin refresh. Re-read
+        # Stripe here so the displayed cancellation/renewal state is authoritative
+        # even if a Billing Portal webhook arrived out of order or was processed
+        # before Stripe's retrieve endpoint reflected the final mutation. This is
+        # intentionally opt-in so ordinary Launcher session/licence polling does
+        # not make a Stripe API call on every request.
+        try:
+            _configure_stripe()
+            remote = stripe.Subscription.retrieve(item.external_subscription_id)
+            _sync_stripe_subscription(db, remote)
+            db.flush()
+            item = db.scalar(
+                select(OrganisationSubscription).where(
+                    OrganisationSubscription.organisation_id == organisation_id
+                )
+            )
+        except Exception:
+            # Keep Organisation Management available if Stripe is temporarily
+            # unreachable; the last successfully synchronised FAST state remains
+            # the fallback and the normal webhook path can repair it later.
+            pass
     if not item:
         return {
             "status": "unconfigured",

@@ -207,7 +207,7 @@ def _overview(db: Session, organisation_id: int) -> dict:
     active_users = sum(1 for item in users if item.status == "active")
     allocated_users = allocated_user_count(db, organisation_id)
     active_devices = sum(1 for item in devices if item.active)
-    subscription = subscription_payload(db, organisation_id)
+    subscription = subscription_payload(db, organisation_id, refresh_provider=True)
     plan = subscription.get("plan") or {}
     max_devices = int(subscription.get("device_limit") or plan.get("max_devices") or 0)
     seat_limit = int(subscription.get("seat_limit") or effective_user_seat_limit(db, organisation))
