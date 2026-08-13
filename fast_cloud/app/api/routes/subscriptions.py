@@ -367,6 +367,11 @@ def subscription_payload(db: Session, organisation_id: int) -> dict:
     status = str(item.status or "unconfigured").lower()
     period_value = item.trial_ends_at if status == "trial" else item.current_period_ends_at
     period_label = "Trial ends" if status == "trial" else ("Access ends" if item.cancel_at_period_end else "Renews")
+    display_status = (
+        "Active — Cancelling"
+        if status == "active" and item.cancel_at_period_end
+        else str(item.status or "unconfigured").replace("_", " ").title()
+    )
     billing_ready = bool(item.billing_provider == "stripe" and item.external_customer_id and _stripe_ready())
 
     # Stripe quantity scales plan capacity. ``seat_override`` stores the paid
@@ -393,7 +398,7 @@ def subscription_payload(db: Session, organisation_id: int) -> dict:
     return {
         "id": item.id,
         "status": item.status,
-        "display_status": str(item.status or "unconfigured").replace("_", " ").title(),
+        "display_status": display_status,
         "billing_interval": item.billing_interval,
         "period_label": period_label,
         "period_value": period_value.isoformat() if period_value else None,
@@ -1068,11 +1073,23 @@ async def stripe_webhook(request: Request) -> dict:
                     details = "Checkout completed without a subscription reference."
             elif event_type in {"customer.subscription.created", "customer.subscription.updated", "customer.subscription.deleted"}:
                 referenced_subscription_id = str(_obj_get(data, "id", "") or "")
-                _sync_stripe_subscription(db, data)
+                # Billing Portal changes can be followed by multiple Stripe events.
+                # For create/update events, fetch the subscription's current state
+                # from Stripe before syncing so cancel_at_period_end and period-end
+                # changes cannot be overwritten by an older event payload arriving
+                # out of order. Deleted events must use their terminal event payload
+                # because the remote subscription may no longer be retrievable.
+                sync_source = data
+                if event_type != "customer.subscription.deleted" and referenced_subscription_id:
+                    try:
+                        sync_source = stripe.Subscription.retrieve(referenced_subscription_id)
+                    except Exception:
+                        sync_source = data
+                _sync_stripe_subscription(db, sync_source)
                 matched_item = _subscription_for_stripe_reference(
                     db,
                     subscription_id=referenced_subscription_id,
-                    customer_id=_stripe_customer_id(data),
+                    customer_id=_stripe_customer_id(sync_source),
                 )
                 if matched_item:
                     if event_type == "customer.subscription.deleted":
@@ -1088,7 +1105,10 @@ async def stripe_webhook(request: Request) -> dict:
                         matched_item.updated_at = datetime.now(timezone.utc)
                         details = "Stripe subscription deleted; FAST access is cancelled immediately."
                     else:
-                        details = f"Subscription state synchronised to {matched_item.status}."
+                        details = (
+                            f"Subscription state synchronised to {matched_item.status}; "
+                            f"cancel_at_period_end={bool(matched_item.cancel_at_period_end)}."
+                        )
                 else:
                     processing_status = "unmatched"
                     details = "Stripe subscription is not mapped to a FAST organisation."
