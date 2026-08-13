@@ -364,8 +364,18 @@ def subscription_payload(db: Session, organisation_id: int, *, refresh_provider:
         try:
             _configure_stripe()
             remote = stripe.Subscription.retrieve(item.external_subscription_id)
-            _sync_stripe_subscription(db, remote)
-            db.flush()
+            # We already know which FAST organisation owns this subscription.
+            # Do not depend on Stripe metadata being present on every retrieved
+            # object; older subscriptions or portal mutations may not carry it.
+            _sync_stripe_subscription(
+                db,
+                remote,
+                organisation_id_override=organisation_id,
+            )
+            # get_db() does not auto-commit on request completion. Persist the
+            # provider reconciliation performed by this explicit refresh so the
+            # next Launcher request sees the same cancellation state.
+            db.commit()
             item = db.scalar(
                 select(OrganisationSubscription).where(
                     OrganisationSubscription.organisation_id == organisation_id
@@ -997,10 +1007,19 @@ def _ensure_subscription_entitlements(
             db.add(ClubMember(club_id=club.id, user_id=user.id, role=str(user.role or "analyst").lower()))
 
 
-def _sync_stripe_subscription(db: Session, subscription) -> None:
+def _sync_stripe_subscription(
+    db: Session,
+    subscription,
+    *,
+    organisation_id_override: int | None = None,
+) -> None:
     metadata = _obj_get(subscription, "metadata", {}) or {}
-    organisation_id = str(_obj_get(metadata, "fast_organisation_id", "") or "")
+    metadata_organisation_id = str(_obj_get(metadata, "fast_organisation_id", "") or "")
     plan_id = str(_obj_get(metadata, "fast_plan_id", "") or "")
+    if organisation_id_override is not None:
+        organisation_id = str(int(organisation_id_override))
+    else:
+        organisation_id = metadata_organisation_id
     if not organisation_id.isdigit():
         return
     organisation = db.get(Organisation, int(organisation_id))
