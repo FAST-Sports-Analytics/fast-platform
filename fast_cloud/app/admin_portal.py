@@ -19,6 +19,7 @@ from jwt import InvalidTokenError
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
+from app.core.seats import effective_user_seat_limit, organisation_device_capacity
 from app.core.security import (
     create_access_token,
     decode_token,
@@ -678,9 +679,16 @@ def organisation_profile(
     organisation_audit = db.scalars(select(AuditLog).where(AuditLog.admin_user_id.in_([u.id for u in organisation_users] or [-1])).order_by(AuditLog.created_at.desc()).limit(50)).all()
     licence_products = sorted({product for club in organisation.clubs for licence in club.licences if licence.status == "active" for product in json.loads(licence.products_json or "[]")})
     licence_sports = sorted({sport for club in organisation.clubs for licence in club.licences if licence.status == "active" for sport in json.loads(licence.sports_json or "[]")})
+    # The organisation profile template renders both licensed user and device
+    # capacities.  Use the same entitlement helpers as the API so the admin
+    # portal reflects the effective subscription/licence limits instead of
+    # falling back to an em dash when no explicit template context is supplied.
+    seat_limit = effective_user_seat_limit(db, organisation)
+    device_capacity = organisation_device_capacity(organisation)
     return templates.TemplateResponse(request, "organisation_profile.html", {
         "admin": admin, "organisation": organisation, "unassigned_clubs": unassigned_clubs if admin.organisation_id is None else [],
         "active_devices": active_devices, "seats_used": len(member_ids),
+        "seat_limit": seat_limit, "device_capacity": device_capacity,
         "selected_sports": selected_sports, "all_sports": all_sports, "organisation_users": organisation_users,
         "organisation_devices": organisation_devices, "organisation_audit": organisation_audit,
         "licence_products": licence_products, "licence_sports": licence_sports,
