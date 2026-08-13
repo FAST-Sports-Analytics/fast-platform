@@ -18,10 +18,13 @@ type Plan = {
   self_service_upgrades?: boolean;
 };
 
+type SportOption = { key: string; name: string };
+
 type PlansPayload = {
   billing_available?: boolean;
   billing_mode?: "test" | "live" | "unconfigured";
   currency?: string;
+  supported_sports?: SportOption[];
   plans?: Plan[];
 };
 
@@ -69,6 +72,21 @@ export function PricingPlans() {
     const live = (payload.plans || []).filter(plan => plan.name.toLowerCase() !== "custom");
     return live.length ? live : fallback;
   }, [payload]);
+
+  const supportedSports = payload.supported_sports?.length
+    ? payload.supported_sports
+    : [
+        { key: "football", name: "Football" },
+        { key: "rugby", name: "Rugby" },
+        { key: "cricket", name: "Cricket" },
+        { key: "basketball", name: "Basketball" },
+        { key: "baseball", name: "Baseball" },
+        { key: "volleyball", name: "Volleyball" },
+        { key: "tennis", name: "Tennis" },
+        { key: "field_hockey", name: "Field Hockey" },
+        { key: "ice_hockey", name: "Ice Hockey" },
+        { key: "netball", name: "Netball" },
+      ];
 
   const canCheckout = payload.billing_mode === "live" || (payload.billing_mode === "test" && sandboxEnabled);
 
@@ -154,7 +172,9 @@ export function PricingPlans() {
           <label>Your name<input name="name" autoComplete="name" required maxLength={160}/></label>
           <label>Work email<input name="email" type="email" autoComplete="email" required maxLength={320}/></label>
           <label>Club or organisation<input name="organisation" autoComplete="organization" required maxLength={180}/></label>
-          <label>Primary sport<input name="sport" defaultValue={checkout.plan.sports[0]?.replaceAll("_", " ") || "football"} required maxLength={80}/></label>
+          <label>Primary sport<select name="sport" defaultValue={checkout.plan.sports[0] || "football"} required>
+            {supportedSports.map(sport => <option key={sport.key} value={sport.key}>{sport.name}</option>)}
+          </select></label>
           {message && <p className="checkout-error">{message}</p>}
           <button className="button button-primary" type="submit" disabled={submitting}>{submitting ? "Opening Stripe…" : `Continue to Stripe · ${checkout.interval === "monthly" ? money(checkout.plan.monthly_price_pence) : money(checkout.plan.annual_price_pence)}`}</button>
           <small>You will create your FAST administrator password from the secure activation email sent after successful checkout.</small>

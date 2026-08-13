@@ -17,7 +17,7 @@ from app.core.email import EmailDeliveryError, branded_action_email, send_email
 from app.core.rate_limit import RateLimit, client_address, limiter
 from app.core.security import generate_licence_code, hash_licence_code, hash_password, normalise_licence_code
 from app.db.session import SessionLocal, get_db
-from app.models import AuditLog, BillingWebhookEvent, Club, ClubMember, Licence, Organisation, OrganisationSubscription, SubscriptionPlan, User
+from app.models import AuditLog, BillingWebhookEvent, Club, ClubMember, Licence, Organisation, OrganisationSubscription, Sport, SubscriptionPlan, User
 
 try:
     import stripe
@@ -404,10 +404,12 @@ def current_subscription(user: User = Depends(get_current_user), db: Session = D
 @router.get("/public-plans")
 def public_plans(db: Session = Depends(get_db)) -> dict:
     plans = db.scalars(select(SubscriptionPlan).where(SubscriptionPlan.active.is_(True)).order_by(SubscriptionPlan.id)).all()
+    sports = db.scalars(select(Sport).where(Sport.active.is_(True)).order_by(Sport.name)).all()
     return {
         "billing_available": _stripe_ready(),
         "billing_mode": "test" if _stripe_secret_key().startswith("sk_test_") else ("live" if _stripe_ready() else "unconfigured"),
         "currency": settings.billing_currency.lower(),
+        "supported_sports": [{"key": item.key, "name": item.name} for item in sports],
         "plans": [plan_payload(item) for item in plans],
     }
 
@@ -515,6 +517,9 @@ def create_public_checkout_session(
     organisation_name = payload.organisation_name.strip()
     contact_name = payload.contact_name.strip()
     sport = _normalise_sport(payload.sport)
+    supported_sport = db.scalar(select(Sport).where(Sport.key == sport, Sport.active.is_(True)))
+    if not supported_sport:
+        raise HTTPException(status_code=422, detail="Choose a supported FAST sport")
 
     if db.scalar(select(User).where(func.lower(User.email) == email)):
         raise HTTPException(status_code=409, detail="That email already has a FAST account. Contact FAST to change an existing subscription.")
