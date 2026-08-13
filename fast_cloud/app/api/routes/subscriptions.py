@@ -448,6 +448,11 @@ def subscription_payload(db: Session, organisation_id: int, *, refresh_provider:
         "cancel_at_period_end": bool(item.cancel_at_period_end),
         "grace_ends_at": item.grace_ends_at.isoformat() if item.grace_ends_at else None,
         "billing_provider": item.billing_provider,
+        # Authenticated billing diagnostics. These are Stripe object identifiers,
+        # not credentials; exposing them here lets support verify that FAST is
+        # reconciling the same customer/subscription shown in Billing Portal.
+        "stripe_customer_id": item.external_customer_id if item.billing_provider == "stripe" else None,
+        "stripe_subscription_id": item.external_subscription_id if item.billing_provider == "stripe" else None,
         "seat_override": item.seat_override,
         "seat_limit": seat_limit,
         "seats_used": seats_used,
