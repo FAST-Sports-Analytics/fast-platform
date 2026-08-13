@@ -27,6 +27,26 @@ except ImportError:  # Billing remains safely unavailable until dependency is in
 router = APIRouter(prefix="/subscriptions", tags=["subscriptions"])
 settings = get_settings()
 
+# Canonical public sport entitlement catalogue. Keep these keys aligned with
+# FAST Analysis src/core/sports/sport_type.py.
+SUPPORTED_SPORTS = [
+    ("football", "Football"),
+    ("futsal", "Futsal"),
+    ("rugby_union", "Rugby Union"),
+    ("rugby_league", "Rugby League"),
+    ("basketball", "Basketball"),
+    ("field_hockey", "Field Hockey"),
+    ("ice_hockey", "Ice Hockey"),
+    ("cricket", "Cricket"),
+    ("netball", "Netball"),
+    ("volleyball", "Volleyball"),
+    ("handball", "Handball"),
+    ("american_football", "American Football"),
+    ("tennis", "Tennis"),
+    ("baseball", "Baseball"),
+]
+SUPPORTED_SPORT_KEYS = {key for key, _name in SUPPORTED_SPORTS}
+
 
 def _loads(value: str | None, fallback):
     try:
@@ -404,12 +424,11 @@ def current_subscription(user: User = Depends(get_current_user), db: Session = D
 @router.get("/public-plans")
 def public_plans(db: Session = Depends(get_db)) -> dict:
     plans = db.scalars(select(SubscriptionPlan).where(SubscriptionPlan.active.is_(True)).order_by(SubscriptionPlan.id)).all()
-    sports = db.scalars(select(Sport).where(Sport.active.is_(True)).order_by(Sport.name)).all()
     return {
         "billing_available": _stripe_ready(),
         "billing_mode": "test" if _stripe_secret_key().startswith("sk_test_") else ("live" if _stripe_ready() else "unconfigured"),
         "currency": settings.billing_currency.lower(),
-        "supported_sports": [{"key": item.key, "name": item.name} for item in sports],
+        "supported_sports": [{"key": key, "name": name} for key, name in SUPPORTED_SPORTS],
         "plans": [plan_payload(item) for item in plans],
     }
 
@@ -517,8 +536,7 @@ def create_public_checkout_session(
     organisation_name = payload.organisation_name.strip()
     contact_name = payload.contact_name.strip()
     sport = _normalise_sport(payload.sport)
-    supported_sport = db.scalar(select(Sport).where(Sport.key == sport, Sport.active.is_(True)))
-    if not supported_sport:
+    if sport not in SUPPORTED_SPORT_KEYS:
         raise HTTPException(status_code=422, detail="Choose a supported FAST sport")
 
     if db.scalar(select(User).where(func.lower(User.email) == email)):

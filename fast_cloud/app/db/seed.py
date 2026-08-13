@@ -12,11 +12,20 @@ PRODUCTS = [
     ("viewer", "FAST Viewer", "Review, annotate and comment on delivered clips."),
 ]
 SPORTS = [
-    ("football", "Football"), ("rugby", "Rugby"), ("cricket", "Cricket"),
-    ("basketball", "Basketball"), ("baseball", "Baseball"),
-    ("volleyball", "Volleyball"), ("tennis", "Tennis"),
-    ("field_hockey", "Field Hockey"), ("ice_hockey", "Ice Hockey"),
+    ("football", "Football"),
+    ("futsal", "Futsal"),
+    ("rugby_union", "Rugby Union"),
+    ("rugby_league", "Rugby League"),
+    ("basketball", "Basketball"),
+    ("field_hockey", "Field Hockey"),
+    ("ice_hockey", "Ice Hockey"),
+    ("cricket", "Cricket"),
     ("netball", "Netball"),
+    ("volleyball", "Volleyball"),
+    ("handball", "Handball"),
+    ("american_football", "American Football"),
+    ("tennis", "Tennis"),
+    ("baseball", "Baseball"),
 ]
 
 

@@ -77,15 +77,19 @@ export function PricingPlans() {
     ? payload.supported_sports
     : [
         { key: "football", name: "Football" },
-        { key: "rugby", name: "Rugby" },
-        { key: "cricket", name: "Cricket" },
+        { key: "futsal", name: "Futsal" },
+        { key: "rugby_union", name: "Rugby Union" },
+        { key: "rugby_league", name: "Rugby League" },
         { key: "basketball", name: "Basketball" },
-        { key: "baseball", name: "Baseball" },
-        { key: "volleyball", name: "Volleyball" },
-        { key: "tennis", name: "Tennis" },
         { key: "field_hockey", name: "Field Hockey" },
         { key: "ice_hockey", name: "Ice Hockey" },
+        { key: "cricket", name: "Cricket" },
         { key: "netball", name: "Netball" },
+        { key: "volleyball", name: "Volleyball" },
+        { key: "handball", name: "Handball" },
+        { key: "american_football", name: "American Football" },
+        { key: "tennis", name: "Tennis" },
+        { key: "baseball", name: "Baseball" },
       ];
 
   const canCheckout = payload.billing_mode === "live" || (payload.billing_mode === "test" && sandboxEnabled);
