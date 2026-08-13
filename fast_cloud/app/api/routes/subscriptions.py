@@ -448,11 +448,6 @@ def subscription_payload(db: Session, organisation_id: int, *, refresh_provider:
         "cancel_at_period_end": bool(item.cancel_at_period_end),
         "grace_ends_at": item.grace_ends_at.isoformat() if item.grace_ends_at else None,
         "billing_provider": item.billing_provider,
-        # Authenticated billing diagnostics. These are Stripe object identifiers,
-        # not credentials; exposing them here lets support verify that FAST is
-        # reconciling the same customer/subscription shown in Billing Portal.
-        "stripe_customer_id": item.external_customer_id if item.billing_provider == "stripe" else None,
-        "stripe_subscription_id": item.external_subscription_id if item.billing_provider == "stripe" else None,
         "seat_override": item.seat_override,
         "seat_limit": seat_limit,
         "seats_used": seats_used,
@@ -936,6 +931,20 @@ def _subscription_period_end(subscription) -> datetime | None:
     return None
 
 
+def _subscription_cancel_at(subscription) -> datetime | None:
+    """Return Stripe's explicit scheduled cancellation timestamp, if present.
+
+    Stripe Billing Portal can represent an end-of-period cancellation with an
+    explicit ``cancel_at`` timestamp even when ``cancel_at_period_end`` is false.
+    FAST normalises either representation into its existing cancellation flag.
+    """
+    return _stripe_datetime(_obj_get(subscription, "cancel_at"))
+
+
+def _subscription_cancellation_scheduled(subscription) -> bool:
+    return bool(_obj_get(subscription, "cancel_at_period_end", False) or _subscription_cancel_at(subscription))
+
+
 def _ensure_subscription_entitlements(
     db: Session, organisation: Organisation, plan: SubscriptionPlan, *, quantity: int = 1
 ) -> None:
@@ -1063,8 +1072,19 @@ def _sync_stripe_subscription(
     item.external_customer_id = str(_obj_get(subscription, "customer", "") or item.external_customer_id or "") or None
     item.external_subscription_id = str(_obj_get(subscription, "id", "") or item.external_subscription_id or "") or None
     item.trial_ends_at = _stripe_datetime(_obj_get(subscription, "trial_end"))
-    item.current_period_ends_at = _subscription_period_end(subscription)
-    item.cancel_at_period_end = bool(_obj_get(subscription, "cancel_at_period_end", False))
+    period_end = _subscription_period_end(subscription)
+    cancel_at = _subscription_cancel_at(subscription)
+    cancellation_scheduled = _subscription_cancellation_scheduled(subscription)
+    # Normalise both Stripe cancellation representations into FAST's existing
+    # cancel-at-period-end flag. When Stripe supplies an explicit cancel_at
+    # timestamp, use it as the access-end date if it is earlier than the normal
+    # billing period end. This keeps entitlement expiry and customer-facing
+    # wording aligned with the Billing Portal.
+    item.cancel_at_period_end = cancellation_scheduled
+    if cancellation_scheduled and cancel_at and (period_end is None or cancel_at < period_end):
+        item.current_period_ends_at = cancel_at
+    else:
+        item.current_period_ends_at = period_end
     item.updated_at = datetime.now(timezone.utc)
     if effective_plan:
         organisation.subscription_tier = effective_plan.name
