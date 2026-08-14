@@ -79,7 +79,7 @@ def migrate_schema(engine: Engine) -> None:
             "pending_downgrade_plan_id": "INTEGER",
             "pending_downgrade_user_ids_json": "TEXT NOT NULL DEFAULT '[]'",
             "pending_downgrade_device_ids_json": "TEXT NOT NULL DEFAULT '[]'",
-            "pending_downgrade_effective_at": "DATETIME",
+            "pending_downgrade_effective_at": "TIMESTAMP WITH TIME ZONE",
         }
         with engine.begin() as connection:
             for name, definition in subscription_additions.items():
