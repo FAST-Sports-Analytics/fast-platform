@@ -687,6 +687,93 @@ def create_checkout_session(payload: CheckoutRequest, user: User = Depends(get_c
     return {"url": _obj_get(session, "url"), "session_id": _obj_get(session, "id")}
 
 
+class ChangePlanRequest(BaseModel):
+    plan_id: int
+    billing_interval: str = "monthly"
+
+
+@router.post("/change-plan")
+def change_subscription_plan(payload: ChangePlanRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
+    """Change an existing Stripe subscription without creating a second subscription.
+
+    Upgrades are applied immediately and Stripe prorates the remaining period.
+    Downgrades are scheduled for the next renewal so paid access is retained.
+    """
+    organisation_id = _require_org_admin(user)
+    if not _stripe_ready():
+        raise HTTPException(status_code=503, detail="Online billing is not configured yet")
+    item = db.scalar(select(OrganisationSubscription).where(OrganisationSubscription.organisation_id == organisation_id))
+    if not item or item.billing_provider != "stripe" or not item.external_subscription_id:
+        raise HTTPException(status_code=409, detail="This organisation does not have an active Stripe subscription")
+    target = db.get(SubscriptionPlan, payload.plan_id)
+    if not target or not target.active:
+        raise HTTPException(status_code=404, detail="Subscription plan not found")
+    if not target.self_service_upgrades:
+        raise HTTPException(status_code=409, detail="This plan requires a FAST sales-assisted agreement")
+    interval = payload.billing_interval.lower().strip()
+    if interval not in {"monthly", "annual"}:
+        raise HTTPException(status_code=422, detail="Billing interval must be monthly or annual")
+    target_price = _stripe_price_for_plan(target, interval)
+    _configure_stripe()
+    try:
+        current_sub = stripe.Subscription.retrieve(item.external_subscription_id, expand=["items.data.price"])
+        sub_items = _subscription_items(current_sub)
+        if not sub_items:
+            raise HTTPException(status_code=409, detail="Stripe subscription has no billable item")
+        subscription_item_id = str(_obj_get(sub_items[0], "id", "") or "")
+        current_plan = _plan_from_live_stripe_price(db, current_sub) or (db.get(SubscriptionPlan, item.plan_id) if item.plan_id else None)
+        if current_plan and current_plan.id == target.id and _subscription_billing_interval(current_sub, item.billing_interval) == interval:
+            return {"change": "unchanged", "effective": "now", "subscription": subscription_payload(db, organisation_id)}
+
+        current_amount = 0
+        if current_plan:
+            current_interval = _subscription_billing_interval(current_sub, item.billing_interval)
+            current_amount = current_plan.monthly_price_pence if current_interval == "monthly" else current_plan.annual_price_pence
+        target_amount = target.monthly_price_pence if interval == "monthly" else target.annual_price_pence
+        is_downgrade = bool(current_plan and target_amount < current_amount)
+        metadata = dict(_obj_get(current_sub, "metadata", {}) or {})
+        metadata.update({"fast_organisation_id": str(organisation_id), "fast_plan_id": str(target.id), "fast_billing_interval": interval})
+
+        if is_downgrade:
+            period_end = _subscription_period_end(current_sub)
+            if not period_end:
+                raise HTTPException(status_code=409, detail="Stripe did not return the current billing period end")
+            schedule = _obj_get(current_sub, "schedule")
+            schedule_id = str(_obj_get(schedule, "id", schedule) or "").strip()
+            if not schedule_id:
+                schedule_obj = stripe.SubscriptionSchedule.create(from_subscription=item.external_subscription_id)
+                schedule_id = str(_obj_get(schedule_obj, "id", "") or "")
+            current_price = _obj_get(sub_items[0], "price", {}) or {}
+            current_price_id = str(_obj_get(current_price, "id", "") or "")
+            quantity = max(1, int(_obj_get(sub_items[0], "quantity", 1) or 1))
+            stripe.SubscriptionSchedule.modify(
+                schedule_id,
+                end_behavior="release",
+                phases=[
+                    {"items": [{"price": current_price_id, "quantity": quantity}], "end_date": int(period_end.timestamp())},
+                    {"items": [{"price": str(_obj_get(target_price, "id")), "quantity": quantity}], "metadata": metadata},
+                ],
+            )
+            db.add(AuditLog(admin_user_id=user.id, action="subscription_downgrade_scheduled", category="billing", target_type="organisation", target_id=organisation_id, target_label=str(organisation_id), details=f"Scheduled {target.name} ({interval}) for next renewal."))
+            db.commit()
+            return {"change": "downgrade", "effective": "period_end", "effective_at": period_end.isoformat(), "target_plan": plan_payload(target), "subscription": subscription_payload(db, organisation_id)}
+
+        updated = stripe.Subscription.modify(
+            item.external_subscription_id,
+            items=[{"id": subscription_item_id, "price": str(_obj_get(target_price, "id")), "quantity": max(1, int(_obj_get(sub_items[0], "quantity", 1) or 1))}],
+            metadata=metadata,
+            proration_behavior="create_prorations",
+        )
+        _sync_stripe_subscription(db, updated, organisation_id_override=organisation_id)
+        db.add(AuditLog(admin_user_id=user.id, action="subscription_upgraded", category="billing", target_type="organisation", target_id=organisation_id, target_label=str(organisation_id), details=f"Changed to {target.name} ({interval})."))
+        db.commit()
+        return {"change": "upgrade", "effective": "now", "target_plan": plan_payload(target), "subscription": subscription_payload(db, organisation_id)}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Stripe subscription could not be changed: {exc}") from exc
+
+
 @router.post("/portal")
 def create_portal_session(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
     organisation_id = _require_org_admin(user)
