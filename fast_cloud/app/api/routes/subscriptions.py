@@ -854,20 +854,60 @@ def change_subscription_plan(payload: ChangePlanRequest, user: User = Depends(ge
             period_end = _subscription_period_end(current_sub)
             if not period_end:
                 raise HTTPException(status_code=409, detail="Stripe did not return the current billing period end")
+
+            # Stripe requires every current/future phase to be supplied when an
+            # active Subscription Schedule is updated.  In particular, the
+            # current phase needs its original start_date as well as its end_date.
+            # Creating a schedule from the live subscription gives us those exact
+            # phase boundaries; we then append one target-plan billing cycle and
+            # release the subscription so it continues normally on that price.
             schedule = _obj_get(current_sub, "schedule")
             schedule_id = str(_obj_get(schedule, "id", schedule) or "").strip()
             if not schedule_id:
                 schedule_obj = stripe.SubscriptionSchedule.create(from_subscription=item.external_subscription_id)
-                schedule_id = str(_obj_get(schedule_obj, "id", "") or "")
+                schedule_id = str(_obj_get(schedule_obj, "id", "") or "").strip()
+                if not schedule_id:
+                    raise HTTPException(status_code=502, detail="Stripe created a subscription schedule without an id")
+            else:
+                schedule_obj = stripe.SubscriptionSchedule.retrieve(schedule_id)
+
+            # Retrieve once more after creation so current_phase is populated
+            # consistently across Stripe SDK/API versions.
+            schedule_obj = stripe.SubscriptionSchedule.retrieve(schedule_id)
+            current_phase = _obj_get(schedule_obj, "current_phase", {}) or {}
+            current_phase_start = _obj_get(current_phase, "start_date")
+            current_phase_end = _obj_get(current_phase, "end_date")
+            if current_phase_start is None:
+                raise HTTPException(status_code=502, detail="Stripe subscription schedule has no current phase start date")
+
+            phase_end_ts = int(current_phase_end or period_end.timestamp())
             current_price = _obj_get(sub_items[0], "price", {}) or {}
-            current_price_id = str(_obj_get(current_price, "id", "") or "")
+            current_price_id = str(_obj_get(current_price, "id", "") or "").strip()
+            target_price_id = str(_obj_get(target_price, "id", "") or "").strip()
+            if not current_price_id or not target_price_id:
+                raise HTTPException(status_code=409, detail="Stripe subscription price information is incomplete")
             quantity = max(1, int(_obj_get(sub_items[0], "quantity", 1) or 1))
+
+            current_metadata = dict(_obj_get(current_sub, "metadata", {}) or {})
+            target_duration_interval = "month" if interval == "monthly" else "year"
             stripe.SubscriptionSchedule.modify(
                 schedule_id,
                 end_behavior="release",
+                proration_behavior="none",
                 phases=[
-                    {"items": [{"price": current_price_id, "quantity": quantity}], "end_date": int(period_end.timestamp())},
-                    {"items": [{"price": str(_obj_get(target_price, "id")), "quantity": quantity}], "metadata": metadata},
+                    {
+                        "items": [{"price": current_price_id, "quantity": quantity}],
+                        "start_date": int(current_phase_start),
+                        "end_date": phase_end_ts,
+                        "metadata": current_metadata,
+                        "proration_behavior": "none",
+                    },
+                    {
+                        "items": [{"price": target_price_id, "quantity": quantity}],
+                        "duration": {"interval": target_duration_interval, "interval_count": 1},
+                        "metadata": metadata,
+                        "proration_behavior": "none",
+                    },
                 ],
             )
             db.add(AuditLog(admin_user_id=user.id, action="subscription_downgrade_scheduled", category="billing", target_type="organisation", target_id=organisation_id, target_label=str(organisation_id), details=f"Scheduled {target.name} ({interval}) for next renewal."))
