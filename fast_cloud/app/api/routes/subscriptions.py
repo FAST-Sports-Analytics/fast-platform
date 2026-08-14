@@ -1228,7 +1228,12 @@ def _record_billing_webhook_event(
     row.details = details[:2000]
 
 
-def _apply_payment_failure(db: Session, invoice) -> OrganisationSubscription | None:
+def _apply_payment_failure(
+    db: Session,
+    invoice,
+    *,
+    occurred_at: datetime | None = None,
+) -> OrganisationSubscription | None:
     subscription_id = _invoice_subscription_id(invoice)
     customer_id = _stripe_customer_id(invoice)
     item = _subscription_for_stripe_reference(
@@ -1243,7 +1248,7 @@ def _apply_payment_failure(db: Session, invoice) -> OrganisationSubscription | N
         try:
             _configure_stripe()
             remote = stripe.Subscription.retrieve(subscription_id)
-            _sync_stripe_subscription(db, remote)
+            _sync_stripe_subscription(db, remote, grace_reference_at=occurred_at)
         except Exception:
             # The invoice failure itself is still authoritative enough to place
             # an already-matched FAST subscription into grace.
@@ -1251,7 +1256,8 @@ def _apply_payment_failure(db: Session, invoice) -> OrganisationSubscription | N
 
     item.status = "grace_period"
     now = datetime.now(timezone.utc)
-    grace_candidate = now + timedelta(days=max(1, settings.billing_grace_days))
+    grace_reference = occurred_at or now
+    grace_candidate = grace_reference + timedelta(days=max(1, settings.billing_grace_days))
     # Never shorten an existing grace window on Smart Retry attempts.
     if not item.grace_ends_at or item.grace_ends_at < grace_candidate:
         item.grace_ends_at = grace_candidate
@@ -1534,6 +1540,7 @@ def _sync_stripe_subscription(
     subscription,
     *,
     organisation_id_override: int | None = None,
+    grace_reference_at: datetime | None = None,
 ) -> None:
     metadata = _obj_get(subscription, "metadata", {}) or {}
     metadata_organisation_id = str(_obj_get(metadata, "fast_organisation_id", "") or "")
@@ -1568,7 +1575,8 @@ def _sync_stripe_subscription(
     if mapped_status == "past_due":
         item.status = "grace_period"
         if not item.grace_ends_at:
-            item.grace_ends_at = datetime.now(timezone.utc) + timedelta(days=max(1, settings.billing_grace_days))
+            grace_reference = grace_reference_at or datetime.now(timezone.utc)
+            item.grace_ends_at = grace_reference + timedelta(days=max(1, settings.billing_grace_days))
     else:
         item.status = mapped_status
         if mapped_status in {"active", "trial"}:
@@ -1625,6 +1633,7 @@ async def stripe_webhook(request: Request) -> dict:
         raise HTTPException(status_code=400, detail="Invalid Stripe webhook") from exc
 
     event_type = str(_obj_get(event, "type", ""))
+    event_created_at = _stripe_datetime(_obj_get(event, "created"))
     data = _obj_get(_obj_get(event, "data", {}), "object", {})
     with SessionLocal() as db:
         matched_item = None
@@ -1665,7 +1674,7 @@ async def stripe_webhook(request: Request) -> dict:
                         sync_source = stripe.Subscription.retrieve(referenced_subscription_id)
                     except Exception:
                         sync_source = data
-                _sync_stripe_subscription(db, sync_source)
+                _sync_stripe_subscription(db, sync_source, grace_reference_at=event_created_at)
                 matched_item = _subscription_for_stripe_reference(
                     db,
                     subscription_id=referenced_subscription_id,
@@ -1694,7 +1703,7 @@ async def stripe_webhook(request: Request) -> dict:
                     details = "Stripe subscription is not mapped to a FAST organisation."
             elif event_type in {"invoice.payment_failed", "invoice.payment_action_required"}:
                 referenced_subscription_id = _invoice_subscription_id(data)
-                matched_item = _apply_payment_failure(db, data)
+                matched_item = _apply_payment_failure(db, data, occurred_at=event_created_at)
                 if matched_item:
                     details = (
                         f"Payment failure applied; FAST access remains available during grace until "
