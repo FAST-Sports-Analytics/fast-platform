@@ -1003,23 +1003,27 @@ def _ensure_subscription_entitlements(
     # updating only the first club/latest licence can leave the licence actually
     # used by Launcher on the old tier.  Synchronise every current club-owned
     # licence for this organisation, while still creating one when none exists.
-    # Resolve the organisation's club ids first, then update licences directly by
-    # their FK.  This deliberately mirrors the licence ownership chain used by
-    # /licenses/current (Licence.club_id -> Club.organisation_id) and avoids a
-    # joined ORM query silently missing an already-activated legacy licence.
-    organisation_club_ids = list(db.scalars(
-        select(Club.id).where(Club.organisation_id == organisation.id).order_by(Club.id)
-    ).all())
-    organisation_licences = []
-    if organisation_club_ids:
-        organisation_licences = list(db.scalars(
-            select(Licence)
-            .where(
-                Licence.club_id.in_(organisation_club_ids),
-                func.lower(func.trim(Licence.owner_type)) == "club",
-            )
-            .order_by(Licence.id.desc())
-        ).all())
+    # Resolve the concrete club ids first, then target licence rows directly.
+    # This mirrors /licenses/current and avoids relying on an ORM join path when
+    # repairing an already-provisioned organisation licence.
+    organisation_club_ids = list(
+        db.scalars(
+            select(Club.id)
+            .where(Club.organisation_id == organisation.id)
+            .order_by(Club.id)
+        ).all()
+    )
+    if club.id not in organisation_club_ids:
+        organisation_club_ids.append(club.id)
+
+    organisation_licences = db.scalars(
+        select(Licence)
+        .where(
+            Licence.club_id.in_(organisation_club_ids),
+            Licence.owner_type == "club",
+        )
+        .order_by(Licence.id.desc())
+    ).all()
     if not organisation_licences:
         code = generate_licence_code(plan.name)
         licence = Licence(
@@ -1043,6 +1047,12 @@ def _ensure_subscription_entitlements(
         licence.max_users = licensed_users
         licence.status = "active"
         licence.renewable = True
+
+    # Flush the licence writes before the subscription assignment response is
+    # produced.  This also makes failures visible in /docs immediately instead
+    # of leaving the organisation tier updated while the desktop licence stays
+    # stale.
+    db.flush()
 
     # Keep organisation users inside the subscription envelope. Their explicit
     # assignment can narrow access later, but a newly provisioned administrator
