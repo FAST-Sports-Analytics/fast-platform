@@ -1258,8 +1258,10 @@ def _apply_payment_failure(
     now = datetime.now(timezone.utc)
     grace_reference = occurred_at or now
     grace_candidate = grace_reference + timedelta(days=max(1, settings.billing_grace_days))
-    # Never shorten an existing grace window on Smart Retry attempts.
-    if not item.grace_ends_at or item.grace_ends_at < grace_candidate:
+    # The grace deadline belongs to the original failed renewal, not to each
+    # subsequent Stripe Smart Retry.  Once grace has started, preserve that
+    # deadline so repeated payment failures cannot extend FAST access.
+    if not item.grace_ends_at:
         item.grace_ends_at = grace_candidate
     item.updated_at = now
     return item
