@@ -1296,9 +1296,24 @@ def cancel_subscription_at_period_end(user: User = Depends(get_current_user), db
             db.commit()
             return {"cancelled_at_period_end": True, "message": "Your FAST subscription is already scheduled to cancel at the end of the paid period.", "subscription": subscription_payload(db, organisation_id)}
 
-        updated = stripe.Subscription.modify(item.external_subscription_id, cancel_at_period_end=True)
+        schedule_id = _subscription_schedule_id(current_sub)
+        if schedule_id:
+            # Stripe forbids changing cancellation fields directly while a
+            # Subscription Schedule owns the subscription.  Make the schedule
+            # cancel when its current/final phase ends instead.  This also
+            # covers subscriptions that reached a downgraded phase but remain
+            # schedule-managed until that phase completes.
+            stripe.SubscriptionSchedule.modify(schedule_id, end_behavior="cancel")
+            updated = None
+        else:
+            updated = stripe.Subscription.modify(item.external_subscription_id, cancel_at_period_end=True)
         refreshed = stripe.Subscription.retrieve(item.external_subscription_id, expand=["items.data.price"])
         _sync_stripe_subscription(db, refreshed or updated, organisation_id_override=organisation_id)
+        if schedule_id and not item.cancel_at_period_end:
+            # Some Stripe API versions do not mirror schedule end_behavior onto
+            # cancel_at/cancel_at_period_end immediately. Persist the equivalent
+            # FAST state so the website accurately shows the pending expiry.
+            item.cancel_at_period_end = True
         db.add(AuditLog(admin_user_id=user.id, action="subscription_cancellation_scheduled", category="billing", target_type="organisation", target_id=organisation_id, target_label=str(organisation_id), details="Subscription cancellation scheduled for the end of the current paid period."))
         db.commit()
         return {"cancelled_at_period_end": True, "message": "Cancellation scheduled. Your FAST access will continue until the end of your current paid period.", "subscription": subscription_payload(db, organisation_id)}
@@ -1321,14 +1336,24 @@ def undo_subscription_cancellation(user: User = Depends(get_current_user), db: S
     _configure_stripe()
     try:
         current_sub = stripe.Subscription.retrieve(item.external_subscription_id, expand=["items.data.price"])
-        if not _subscription_cancellation_scheduled(current_sub):
+        if not (_subscription_cancellation_scheduled(current_sub) or _schedule_cancels_at_end(current_sub)):
             _sync_stripe_subscription(db, current_sub, organisation_id_override=organisation_id)
             db.commit()
             return {"cancellation_removed": True, "message": "Your FAST subscription is already set to continue.", "subscription": subscription_payload(db, organisation_id)}
 
-        updated = stripe.Subscription.modify(item.external_subscription_id, cancel_at_period_end=False)
+        schedule_id = _subscription_schedule_id(current_sub)
+        schedule_cancellation = _schedule_cancels_at_end(current_sub) if schedule_id else False
+        if schedule_cancellation:
+            # Restore the schedule's normal release behaviour so the current
+            # subscription continues after the scheduled phase.
+            stripe.SubscriptionSchedule.modify(schedule_id, end_behavior="release")
+            updated = None
+        else:
+            updated = stripe.Subscription.modify(item.external_subscription_id, cancel_at_period_end=False)
         refreshed = stripe.Subscription.retrieve(item.external_subscription_id, expand=["items.data.price"])
         _sync_stripe_subscription(db, refreshed or updated, organisation_id_override=organisation_id)
+        if schedule_cancellation:
+            item.cancel_at_period_end = False
         db.add(AuditLog(admin_user_id=user.id, action="subscription_cancellation_reversed", category="billing", target_type="organisation", target_id=organisation_id, target_label=str(organisation_id), details="Scheduled subscription cancellation removed; current subscription will renew normally."))
         db.commit()
         return {"cancellation_removed": True, "message": "Cancellation removed. Your FAST subscription will continue and renew normally.", "subscription": subscription_payload(db, organisation_id)}
@@ -1665,6 +1690,23 @@ def _subscription_cancel_at(subscription) -> datetime | None:
 
 def _subscription_cancellation_scheduled(subscription) -> bool:
     return bool(_obj_get(subscription, "cancel_at_period_end", False) or _subscription_cancel_at(subscription))
+
+
+def _subscription_schedule_id(subscription) -> str:
+    schedule_ref = _obj_get(subscription, "schedule")
+    return str(_obj_get(schedule_ref, "id", schedule_ref) or "").strip()
+
+
+def _schedule_cancels_at_end(subscription) -> bool:
+    """Return whether an attached Stripe Subscription Schedule ends by cancelling."""
+    schedule_id = _subscription_schedule_id(subscription)
+    if not schedule_id:
+        return False
+    schedule = stripe.SubscriptionSchedule.retrieve(schedule_id)
+    return (
+        str(_obj_get(schedule, "status", "") or "").lower() in {"active", "not_started"}
+        and str(_obj_get(schedule, "end_behavior", "") or "").lower() == "cancel"
+    )
 
 
 def _ensure_subscription_entitlements(
