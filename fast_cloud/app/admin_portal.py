@@ -2421,7 +2421,21 @@ def assign_subscription_plan(request: Request, organisation_id: int = Form(...),
     item.plan_id = plan.id; item.status = status if status in {"trial","active","past_due","grace_period","cancelled","expired"} else "active"
     item.billing_interval = billing_interval if billing_interval in {"monthly","annual","manual"} else "monthly"
     item.seat_override = int(seat_override) if seat_override.strip().isdigit() and int(seat_override) > 0 else None
-    organisation.subscription_tier = plan.name; organisation.max_seats = item.seat_override or plan.included_seats
+    effective_seat_limit = max(1, int(item.seat_override or plan.included_seats or 1))
+    organisation.subscription_tier = plan.name
+    organisation.max_seats = effective_seat_limit
+
+    # The Admin Portal must use the same entitlement materialisation path as
+    # the subscription API and Stripe synchronisation.  Updating only the
+    # OrganisationSubscription row leaves the Launcher-backed Licence on the
+    # previous plan (products/features/device limits), producing a mixed state
+    # such as Starter with Viewer and five devices.  Import lazily to avoid
+    # coupling module initialisation while keeping one canonical sync helper.
+    from app.api.routes.subscriptions import _ensure_subscription_entitlements
+    _ensure_subscription_entitlements(
+        db, organisation, plan, quantity=1, seat_limit=effective_seat_limit
+    )
+
     _record_audit(db, admin, action="subscription_assigned", category="billing", target_type="organisation", target_id=organisation.id, target_label=organisation.name, details=f"Assigned {plan.name} ({item.billing_interval}).")
     db.commit()
     return RedirectResponse("/admin/subscriptions?message=Subscription+assigned.", status_code=303)
