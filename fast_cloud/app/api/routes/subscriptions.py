@@ -1274,6 +1274,70 @@ def cancel_scheduled_plan_change(user: User = Depends(get_current_user), db: Ses
         raise HTTPException(status_code=502, detail=f"Stripe scheduled subscription change could not be cancelled: {exc}") from exc
 
 
+@router.post("/cancel")
+def cancel_subscription_at_period_end(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
+    """Schedule the organisation's Stripe subscription to end after paid access expires."""
+    organisation_id = _require_org_admin(user)
+    item = db.scalar(select(OrganisationSubscription).where(OrganisationSubscription.organisation_id == organisation_id))
+    if not item or item.billing_provider != "stripe" or not item.external_subscription_id:
+        raise HTTPException(status_code=409, detail="This organisation does not have an active Stripe subscription")
+    if not _stripe_ready():
+        raise HTTPException(status_code=503, detail="Online billing is not configured yet")
+    if item.status not in {"active", "trial"}:
+        raise HTTPException(status_code=409, detail="Only an active FAST subscription can be cancelled")
+
+    _configure_stripe()
+    try:
+        current_sub = stripe.Subscription.retrieve(item.external_subscription_id, expand=["items.data.price"])
+        if _scheduled_plan_change_payload(db, item):
+            raise HTTPException(status_code=409, detail="Cancel the scheduled plan or billing change before cancelling your FAST subscription")
+        if _subscription_cancellation_scheduled(current_sub):
+            _sync_stripe_subscription(db, current_sub, organisation_id_override=organisation_id)
+            db.commit()
+            return {"cancelled_at_period_end": True, "message": "Your FAST subscription is already scheduled to cancel at the end of the paid period.", "subscription": subscription_payload(db, organisation_id)}
+
+        updated = stripe.Subscription.modify(item.external_subscription_id, cancel_at_period_end=True)
+        refreshed = stripe.Subscription.retrieve(item.external_subscription_id, expand=["items.data.price"])
+        _sync_stripe_subscription(db, refreshed or updated, organisation_id_override=organisation_id)
+        db.add(AuditLog(admin_user_id=user.id, action="subscription_cancellation_scheduled", category="billing", target_type="organisation", target_id=organisation_id, target_label=str(organisation_id), details="Subscription cancellation scheduled for the end of the current paid period."))
+        db.commit()
+        return {"cancelled_at_period_end": True, "message": "Cancellation scheduled. Your FAST access will continue until the end of your current paid period.", "subscription": subscription_payload(db, organisation_id)}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Stripe subscription cancellation could not be scheduled: {exc}") from exc
+
+
+@router.post("/cancel/undo")
+def undo_subscription_cancellation(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
+    """Remove a pending period-end cancellation and keep the current subscription active."""
+    organisation_id = _require_org_admin(user)
+    item = db.scalar(select(OrganisationSubscription).where(OrganisationSubscription.organisation_id == organisation_id))
+    if not item or item.billing_provider != "stripe" or not item.external_subscription_id:
+        raise HTTPException(status_code=409, detail="This organisation does not have an active Stripe subscription")
+    if not _stripe_ready():
+        raise HTTPException(status_code=503, detail="Online billing is not configured yet")
+
+    _configure_stripe()
+    try:
+        current_sub = stripe.Subscription.retrieve(item.external_subscription_id, expand=["items.data.price"])
+        if not _subscription_cancellation_scheduled(current_sub):
+            _sync_stripe_subscription(db, current_sub, organisation_id_override=organisation_id)
+            db.commit()
+            return {"cancellation_removed": True, "message": "Your FAST subscription is already set to continue.", "subscription": subscription_payload(db, organisation_id)}
+
+        updated = stripe.Subscription.modify(item.external_subscription_id, cancel_at_period_end=False)
+        refreshed = stripe.Subscription.retrieve(item.external_subscription_id, expand=["items.data.price"])
+        _sync_stripe_subscription(db, refreshed or updated, organisation_id_override=organisation_id)
+        db.add(AuditLog(admin_user_id=user.id, action="subscription_cancellation_reversed", category="billing", target_type="organisation", target_id=organisation_id, target_label=str(organisation_id), details="Scheduled subscription cancellation removed; current subscription will renew normally."))
+        db.commit()
+        return {"cancellation_removed": True, "message": "Cancellation removed. Your FAST subscription will continue and renew normally.", "subscription": subscription_payload(db, organisation_id)}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Stripe subscription cancellation could not be reversed: {exc}") from exc
+
+
 @router.post("/portal")
 def create_portal_session(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
     organisation_id = _require_org_admin(user)

@@ -28,6 +28,8 @@ type Subscription = {
   period_value?: string | null;
   billing_ready: boolean;
   can_manage_billing: boolean;
+  cancel_at_period_end?: boolean;
+  current_period_ends_at?: string | null;
   seat_limit?: number | null;
   seats_used?: number;
   device_limit?: number | null;
@@ -120,6 +122,7 @@ export default function AccountPage() {
   const [error, setError] = useState("");
   const [planPreview, setPlanPreview] = useState<PlanChangePreview | null>(null);
   const [cancelScheduledChangeOpen, setCancelScheduledChangeOpen] = useState(false);
+  const [cancelSubscriptionOpen, setCancelSubscriptionOpen] = useState(false);
   const [capacityManagerOpen, setCapacityManagerOpen] = useState(false);
   const [capacityOverview, setCapacityOverview] = useState<OrganisationManagementOverview | null>(null);
   const [selectedUserIds, setSelectedUserIds] = useState<number[]>([]);
@@ -369,6 +372,37 @@ export default function AccountPage() {
     }
   }
 
+  async function cancelSubscription() {
+    setWorking(true);
+    setMessage("");
+    setError("");
+    try {
+      const data = await api("/api/v1/subscriptions/cancel", { method: "POST" });
+      setMessage(data.message || "Cancellation scheduled. Your FAST access remains active until the end of the paid period.");
+      setCancelSubscriptionOpen(false);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "FAST Cloud could not schedule the subscription cancellation.");
+    } finally {
+      setWorking(false);
+    }
+  }
+
+  async function undoCancellation() {
+    setWorking(true);
+    setMessage("");
+    setError("");
+    try {
+      const data = await api("/api/v1/subscriptions/cancel/undo", { method: "POST" });
+      setMessage(data.message || "Cancellation removed. Your FAST subscription will continue.");
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "FAST Cloud could not remove the scheduled cancellation.");
+    } finally {
+      setWorking(false);
+    }
+  }
+
   async function manageBilling() {
     setWorking(true);
     setError("");
@@ -405,6 +439,14 @@ export default function AccountPage() {
 
       {error && <div className="account-message error">{error}</div>}
       {message && <div className="account-message success">{message}</div>}
+      {subscription?.cancel_at_period_end && <div className="account-scheduled-change account-cancellation-notice">
+        <div>
+          <strong>Subscription cancellation scheduled</strong>
+          <span>Your FAST {subscription.plan?.name || "subscription"} access remains active until {dateLabel(subscription.current_period_ends_at || subscription.period_value)}. You will not be charged again unless you keep the subscription.</span>
+        </div>
+        <button className="button button-primary button-small" type="button" disabled={working} onClick={undoCancellation}>{working ? "Processing…" : "Keep subscription"}</button>
+      </div>}
+
       {subscription?.scheduled_plan_change && <div className="account-scheduled-change">
         <div>
           <strong>{scheduledBillingIntervalChange ? "Billing change scheduled" : "Downgrade scheduled"}</strong>
@@ -430,6 +472,8 @@ export default function AccountPage() {
           {subscription?.plan && <div className="account-entitlements"><span>{subscription.plan.products.map(value => `FAST ${value[0].toUpperCase()}${value.slice(1)}`).join(" + ")}</span><span>{subscription.plan.cloud_storage_gb} GB cloud storage</span></div>}
           <div className="account-actions">
             <button className="button button-quiet" type="button" disabled={working || !subscription?.can_manage_billing} onClick={manageBilling}>Manage payment & invoices</button>
+            {!subscription?.cancel_at_period_end && <button className="button button-danger" type="button" disabled={working || !subscription?.can_manage_billing || Boolean(subscription?.scheduled_plan_change)} onClick={() => setCancelSubscriptionOpen(true)}>Cancel subscription</button>}
+            {subscription?.cancel_at_period_end && <button className="button button-primary" type="button" disabled={working} onClick={undoCancellation}>{working ? "Processing…" : "Keep subscription"}</button>}
           </div>
         </section>
 
@@ -460,6 +504,26 @@ export default function AccountPage() {
         </section>
       </>}
     </div>
+
+    {cancelSubscriptionOpen && subscription?.plan && <div className="account-modal-backdrop" role="presentation" onMouseDown={() => !working && setCancelSubscriptionOpen(false)}>
+      <section className="account-modal" role="dialog" aria-modal="true" aria-labelledby="cancel-subscription-title" onMouseDown={event => event.stopPropagation()}>
+        <button className="account-modal-close" type="button" aria-label="Close" disabled={working} onClick={() => setCancelSubscriptionOpen(false)}>×</button>
+        <p className="eyebrow">Subscription</p>
+        <h2 id="cancel-subscription-title">Cancel FAST {subscription.plan.name}?</h2>
+        <div className="account-confirm-summary">
+          <div><span>Current plan</span><strong>FAST {subscription.plan.name}</strong></div>
+          <div><span>Access continues until</span><strong>{dateLabel(subscription.current_period_ends_at || subscription.period_value)}</strong></div>
+          <div><span>Further renewal charges</span><strong>Stopped</strong></div>
+        </div>
+        <p className="account-confirm-copy">Your FAST products, seats, devices and cloud access stay available until the end of the period you have already paid for. After that date the subscription ends and licensed FAST applications will no longer be available to the organisation.</p>
+        <p className="account-confirm-copy">You can reverse this cancellation from this page at any time before the subscription ends.</p>
+        <div className="account-modal-actions">
+          <button className="button button-quiet" type="button" disabled={working} onClick={() => setCancelSubscriptionOpen(false)}>Keep FAST</button>
+          <button className="button button-danger" type="button" disabled={working} onClick={cancelSubscription}>{working ? "Processing…" : "Cancel at period end"}</button>
+        </div>
+        <p className="account-confirm-footnote">Cancellation is sent securely to Stripe. No refund is issued automatically because your existing access remains available through the paid period.</p>
+      </section>
+    </div>}
 
     {cancelScheduledChangeOpen && subscription?.scheduled_plan_change && <div className="account-modal-backdrop" role="presentation" onMouseDown={() => !working && setCancelScheduledChangeOpen(false)}>
       <section className="account-modal" role="dialog" aria-modal="true" aria-labelledby="cancel-scheduled-change-title" onMouseDown={event => event.stopPropagation()}>
