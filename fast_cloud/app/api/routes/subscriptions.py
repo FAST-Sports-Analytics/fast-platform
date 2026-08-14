@@ -408,6 +408,10 @@ def subscription_payload(db: Session, organisation_id: int, *, refresh_provider:
             if grace_end and grace_end.tzinfo is None:
                 grace_end = grace_end.replace(tzinfo=timezone.utc)
             if item.status in {"grace_period", "past_due"} and grace_end and provider_now >= grace_end:
+                # Grace expiry is a commercial cancellation, not merely a FAST
+                # entitlement change. Terminate the Stripe contract as well so
+                # Smart Retries stop and no future renewal is generated.
+                _terminate_stripe_subscription_after_grace(item.external_subscription_id, remote)
                 item.status = "cancelled"
                 item.cancel_at_period_end = False
                 item.grace_ends_at = None
@@ -1798,6 +1802,42 @@ def _schedule_cancels_at_end(subscription) -> bool:
         str(_obj_get(schedule, "status", "") or "").lower() in {"active", "not_started"}
         and str(_obj_get(schedule, "end_behavior", "") or "").lower() == "cancel"
     )
+
+
+def _terminate_stripe_subscription_after_grace(subscription_id: str, subscription=None) -> None:
+    """Terminate Stripe billing when FAST's payment-failure grace period expires.
+
+    Schedule-managed subscriptions must be cancelled through the Subscription
+    Schedule API; Stripe rejects direct subscription cancellation mutations while
+    the schedule owns the subscription. Any still-open invoices for the ended
+    contract are voided so Stripe Smart Retries cannot continue after FAST has
+    cancelled access.
+    """
+    if not subscription_id or not _stripe_ready():
+        return
+
+    _configure_stripe()
+    current = subscription or stripe.Subscription.retrieve(subscription_id)
+    schedule_id = _subscription_schedule_id(current)
+
+    if schedule_id:
+        schedule = stripe.SubscriptionSchedule.retrieve(schedule_id)
+        schedule_status = str(_obj_get(schedule, "status", "") or "").lower()
+        if schedule_status in {"active", "not_started"}:
+            stripe.SubscriptionSchedule.cancel(schedule_id)
+    else:
+        status = str(_obj_get(current, "status", "") or "").lower()
+        if status not in {"canceled", "cancelled", "incomplete_expired"}:
+            stripe.Subscription.cancel(subscription_id)
+
+    # Cancellation does not necessarily erase an already-open renewal invoice.
+    # FAST's grace policy treats the debt as closed once access is terminated,
+    # therefore void open invoices to stop any further automatic collection.
+    invoices = stripe.Invoice.list(subscription=subscription_id, status="open", limit=100)
+    for invoice in _obj_get(invoices, "data", []) or []:
+        invoice_id = str(_obj_get(invoice, "id", "") or "").strip()
+        if invoice_id:
+            stripe.Invoice.void_invoice(invoice_id)
 
 
 
