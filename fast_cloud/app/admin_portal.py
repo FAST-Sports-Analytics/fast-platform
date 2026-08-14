@@ -2442,8 +2442,30 @@ def subscriptions_page(request: Request, db: Session = Depends(get_db)):
     if not admin.is_admin:
         return RedirectResponse("/admin/my-organisation", status_code=303)
     from app.models import OrganisationSubscription, SubscriptionPlan
+    from app.api.routes.subscriptions import subscription_payload
+
     plans = db.scalars(select(SubscriptionPlan).order_by(SubscriptionPlan.name)).all()
     organisations = db.scalars(select(Organisation).order_by(Organisation.name)).all()
+
+    # The owner subscription table must reflect Stripe's authoritative state,
+    # including Test Clock time.  Without this explicit refresh the customer
+    # account can already be cancelled/expired while this admin table still
+    # displays a stale Active or Grace Period row until another webhook/request
+    # happens to materialise the state.
+    stripe_org_ids = db.scalars(
+        select(OrganisationSubscription.organisation_id).where(
+            OrganisationSubscription.billing_provider == "stripe",
+            OrganisationSubscription.external_subscription_id.is_not(None),
+        )
+    ).all()
+    for organisation_id in stripe_org_ids:
+        try:
+            subscription_payload(db, organisation_id, refresh_provider=True)
+        except Exception:
+            # Keep the admin portal available if Stripe is temporarily
+            # unreachable. The last successfully persisted state remains visible.
+            pass
+
     subscriptions = db.scalars(select(OrganisationSubscription).order_by(OrganisationSubscription.id.desc())).all()
     return templates.TemplateResponse(request, "subscriptions.html", {
         "admin": admin, "plans": plans, "organisations": organisations, "subscriptions": subscriptions,
