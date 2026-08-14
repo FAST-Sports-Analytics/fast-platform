@@ -159,6 +159,15 @@ export default function AccountPage() {
       : `${money(subscription.plan.monthly_price_pence)}/month`;
   }, [subscription]);
 
+  const billingIntervalOnlyChange = Boolean(
+    planPreview?.current_plan?.id
+    && planPreview.current_plan.id === planPreview.target_plan.id
+    && planPreview.current_billing_interval
+    && planPreview.current_billing_interval !== planPreview.target_billing_interval
+  );
+  const switchingToAnnualBilling = billingIntervalOnlyChange && planPreview?.target_billing_interval === "annual";
+  const switchingToMonthlyBilling = billingIntervalOnlyChange && planPreview?.target_billing_interval === "monthly";
+
   async function changePlan(plan: Plan, interval: "monthly" | "annual") {
     if (!subscription?.plan) return;
     const samePlan = currentPlanId === plan.id;
@@ -353,7 +362,13 @@ export default function AccountPage() {
       <section className="account-modal" role="dialog" aria-modal="true" aria-labelledby="plan-change-title" onMouseDown={event => event.stopPropagation()}>
         <button className="account-modal-close" type="button" aria-label="Close" disabled={working} onClick={() => setPlanPreview(null)}>×</button>
         <p className="eyebrow">Confirm plan change</p>
-        <h2 id="plan-change-title">{planPreview.change === "downgrade" ? "Schedule your downgrade" : `Upgrade to FAST ${planPreview.target_plan.name}`}</h2>
+        <h2 id="plan-change-title">{
+          billingIntervalOnlyChange
+            ? `Switch to ${planPreview.target_billing_interval === "annual" ? "annual" : "monthly"} billing`
+            : planPreview.change === "downgrade"
+              ? "Schedule your downgrade"
+              : `Upgrade to FAST ${planPreview.target_plan.name}`
+        }</h2>
 
         <div className="account-confirm-plans">
           <article><small>Current</small><strong>FAST {planPreview.current_plan?.name || subscription?.plan?.name}</strong><span>{planPreview.current_billing_interval === "annual" ? `${money(planPreview.current_plan?.annual_price_pence || 0)}/year` : `${money(planPreview.current_plan?.monthly_price_pence || 0)}/month`}</span></article>
@@ -363,12 +378,16 @@ export default function AccountPage() {
 
         {planPreview.change === "upgrade" ? <>
           <div className="account-confirm-summary">
-            <div><span>Unused-plan credit</span><strong>{money(planPreview.credit_pence || 0)}</strong></div>
-            <div><span>Professional access for the remaining period</span><strong>{money(planPreview.upgrade_charge_pence || 0)}</strong></div>
+            <div><span>{switchingToAnnualBilling ? "Unused monthly-plan credit" : switchingToMonthlyBilling ? "Unused annual-plan credit" : "Unused-plan credit"}</span><strong>{money(planPreview.credit_pence || 0)}</strong></div>
+            <div><span>{switchingToAnnualBilling ? "Annual plan charge" : switchingToMonthlyBilling ? "Monthly plan charge" : `${planPreview.target_plan.name} access for the remaining period`}</span><strong>{money(planPreview.upgrade_charge_pence || 0)}</strong></div>
             <div className="total"><span>Estimated amount due now</span><strong>{money(planPreview.amount_due_now_pence || 0)}</strong></div>
             <div><span>Next renewal</span><strong>{money(planPreview.next_renewal_amount_pence || 0)} on {dateLabel(planPreview.next_renewal_at)}</strong></div>
           </div>
-          <p className="account-confirm-copy">Stripe calculates the exact proration. Your unused FAST {planPreview.current_plan?.name || "current plan"} time is credited against the upgrade, and the new plan becomes available immediately after the billing change succeeds.</p>
+          <p className="account-confirm-copy">{
+            billingIntervalOnlyChange
+              ? `Stripe calculates the exact proration. Your unused ${planPreview.current_billing_interval === "annual" ? "annual" : "monthly"} FAST ${planPreview.target_plan.name} time is credited against the switch to ${planPreview.target_billing_interval === "annual" ? "annual" : "monthly"} billing. Your FAST plan, products, seats and devices stay the same.`
+              : <>Stripe calculates the exact proration. Your unused FAST {planPreview.current_plan?.name || "current plan"} time is credited against the upgrade, and the new plan becomes available immediately after the billing change succeeds.</>
+          }</p>
         </> : <>
           <div className="account-confirm-summary">
             <div className="total"><span>Amount due now</span><strong>{money(0)}</strong></div>
@@ -380,7 +399,15 @@ export default function AccountPage() {
 
         <div className="account-modal-actions">
           <button className="button button-quiet" type="button" disabled={working} onClick={() => setPlanPreview(null)}>Cancel</button>
-          <button className="button button-primary" type="button" disabled={working} onClick={confirmPlanChange}>{working ? "Processing…" : planPreview.change === "downgrade" ? `Confirm downgrade to FAST ${planPreview.target_plan.name}` : `Confirm upgrade to FAST ${planPreview.target_plan.name}`}</button>
+          <button className="button button-primary" type="button" disabled={working} onClick={confirmPlanChange}>{
+            working
+              ? "Processing…"
+              : billingIntervalOnlyChange
+                ? `Confirm switch to ${planPreview.target_billing_interval === "annual" ? "annual" : "monthly"} billing`
+                : planPreview.change === "downgrade"
+                  ? `Confirm downgrade to FAST ${planPreview.target_plan.name}`
+                  : `Confirm upgrade to FAST ${planPreview.target_plan.name}`
+          }</button>
         </div>
         <p className="account-confirm-footnote">Billing is handled securely by Stripe. The final amount can vary slightly if taxes, discounts or exchange-rate adjustments apply.</p>
       </section>

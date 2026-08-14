@@ -846,6 +846,13 @@ def preview_subscription_plan_change(payload: ChangePlanRequest, user: User = De
         target_amount = target.monthly_price_pence if interval == "monthly" else target.annual_price_pence
         is_downgrade = bool(current_plan and target_amount < current_amount)
         period_end = _subscription_period_end(current_sub)
+        preview_now = datetime.now(timezone.utc)
+        # Stripe resets the billing date when the recurring interval changes
+        # (for example monthly -> annual). Reflect that new cycle in the
+        # confirmation instead of showing the old monthly period end.
+        next_renewal_at = period_end
+        if not is_downgrade and current_interval != interval:
+            next_renewal_at = _next_interval_renewal(preview_now, interval)
         common = {
             "change": "downgrade" if is_downgrade else "upgrade",
             "effective": "period_end" if is_downgrade else "now",
@@ -854,14 +861,14 @@ def preview_subscription_plan_change(payload: ChangePlanRequest, user: User = De
             "target_plan": plan_payload(target),
             "current_billing_interval": current_interval,
             "target_billing_interval": interval,
-            "next_renewal_at": period_end.isoformat() if period_end else None,
+            "next_renewal_at": next_renewal_at.isoformat() if next_renewal_at else None,
             "next_renewal_amount_pence": target_amount,
             "currency": settings.billing_currency.lower(),
         }
         if is_downgrade:
             return {**common, "amount_due_now_pence": 0, "credit_pence": 0, "upgrade_charge_pence": 0, "proration_date": None}
 
-        proration_date = int(datetime.now(timezone.utc).timestamp())
+        proration_date = int(preview_now.timestamp())
         quantity = max(1, int(_obj_get(first_item, "quantity", 1) or 1))
         preview = _preview_plan_change_invoice(
             current_sub,
@@ -1363,6 +1370,28 @@ def _subscription_period_end(subscription) -> datetime | None:
     if items:
         return _stripe_datetime(_obj_get(items[0], "current_period_end"))
     return None
+
+
+def _next_interval_renewal(anchor: datetime, interval: str) -> datetime:
+    """Return the next full renewal after an immediate billing-interval switch."""
+    if interval == "annual":
+        try:
+            return anchor.replace(year=anchor.year + 1)
+        except ValueError:
+            # 29 February -> 28 February in a non-leap renewal year.
+            return anchor.replace(year=anchor.year + 1, day=28)
+    if interval == "monthly":
+        year = anchor.year + (1 if anchor.month == 12 else 0)
+        month = 1 if anchor.month == 12 else anchor.month + 1
+        # Clamp end-of-month anchors where the target month is shorter.
+        day = anchor.day
+        while day > 28:
+            try:
+                return anchor.replace(year=year, month=month, day=day)
+            except ValueError:
+                day -= 1
+        return anchor.replace(year=year, month=month, day=day)
+    return anchor
 
 
 def _subscription_cancel_at(subscription) -> datetime | None:
