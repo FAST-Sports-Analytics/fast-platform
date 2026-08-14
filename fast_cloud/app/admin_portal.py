@@ -2482,8 +2482,19 @@ def create_subscription_plan(
 
 
 @router.post("/subscriptions/assign")
-def assign_subscription_plan(request: Request, organisation_id: int = Form(...), plan_id: int = Form(...),
-    status: str = Form("active"), billing_interval: str = Form("monthly"), seat_override: str = Form(""), db: Session = Depends(get_db)):
+def assign_subscription_plan(
+    request: Request,
+    organisation_id: int = Form(...),
+    plan_id: int = Form(...),
+    status: str = Form("active"),
+    billing_interval: str = Form("monthly"),
+    seat_override: str = Form(""),
+    trial_ends_at: str = Form(""),
+    current_period_ends_at: str = Form(""),
+    grace_ends_at: str = Form(""),
+    cancel_at_period_end: str | None = Form(None),
+    db: Session = Depends(get_db),
+):
     admin = require_portal_admin(request, db)
     if not admin.is_admin:
         raise HTTPException(status_code=403, detail="FAST owner access required")
@@ -2494,9 +2505,38 @@ def assign_subscription_plan(request: Request, organisation_id: int = Form(...),
     item = db.scalar(select(OrganisationSubscription).where(OrganisationSubscription.organisation_id == organisation.id))
     if not item:
         item = OrganisationSubscription(organisation_id=organisation.id); db.add(item)
-    item.plan_id = plan.id; item.status = status if status in {"trial","active","past_due","grace_period","cancelled","expired"} else "active"
+    item.plan_id = plan.id
+    item.status = status if status in {"trial","active","past_due","grace_period","cancelled","expired"} else "active"
     item.billing_interval = billing_interval if billing_interval in {"monthly","annual","manual"} else "monthly"
     item.seat_override = int(seat_override) if seat_override.strip().isdigit() and int(seat_override) > 0 else None
+
+    def _parse_admin_datetime(raw: str) -> datetime | None:
+        value = (raw or "").strip()
+        if not value:
+            return None
+        parsed = datetime.fromisoformat(value)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        else:
+            parsed = parsed.astimezone(timezone.utc)
+        return parsed
+
+    # These fields are present in the Admin Portal form but were previously
+    # ignored by this route.  When an administrator explicitly supplies a
+    # timestamp, persist it on the OrganisationSubscription.  Blank date
+    # fields preserve the existing value so opening the form does not
+    # accidentally erase Stripe-managed subscription dates.
+    parsed_trial_end = _parse_admin_datetime(trial_ends_at)
+    parsed_period_end = _parse_admin_datetime(current_period_ends_at)
+    parsed_grace_end = _parse_admin_datetime(grace_ends_at)
+    if parsed_trial_end is not None:
+        item.trial_ends_at = parsed_trial_end
+    if parsed_period_end is not None:
+        item.current_period_ends_at = parsed_period_end
+    if parsed_grace_end is not None:
+        item.grace_ends_at = parsed_grace_end
+    item.cancel_at_period_end = bool(cancel_at_period_end)
+
     effective_seat_limit = max(1, int(item.seat_override or plan.included_seats or 1))
     organisation.subscription_tier = plan.name
     organisation.max_seats = effective_seat_limit
@@ -2512,6 +2552,27 @@ def assign_subscription_plan(request: Request, organisation_id: int = Form(...),
         db, organisation, plan, quantity=1, seat_limit=effective_seat_limit
     )
 
-    _record_audit(db, admin, action="subscription_assigned", category="billing", target_type="organisation", target_id=organisation.id, target_label=organisation.name, details=f"Assigned {plan.name} ({item.billing_interval}).")
+    override_bits = []
+    if parsed_trial_end is not None:
+        override_bits.append(f"trial_end={parsed_trial_end.isoformat()}")
+    if parsed_period_end is not None:
+        override_bits.append(f"period_end={parsed_period_end.isoformat()}")
+    if parsed_grace_end is not None:
+        override_bits.append(f"grace_end={parsed_grace_end.isoformat()}")
+    if cancel_at_period_end:
+        override_bits.append("cancel_at_period_end=true")
+    details = f"Assigned {plan.name} ({item.billing_interval})."
+    if override_bits:
+        details += " Admin overrides: " + ", ".join(override_bits) + "."
+    _record_audit(
+        db,
+        admin,
+        action="subscription_assigned",
+        category="billing",
+        target_type="organisation",
+        target_id=organisation.id,
+        target_label=organisation.name,
+        details=details,
+    )
     db.commit()
     return RedirectResponse("/admin/subscriptions?message=Subscription+assigned.", status_code=303)
