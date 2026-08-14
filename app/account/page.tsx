@@ -30,6 +30,10 @@ type Subscription = {
   can_manage_billing: boolean;
   cancel_at_period_end?: boolean;
   current_period_ends_at?: string | null;
+  grace_ends_at?: string | null;
+  next_payment_attempt_at?: string | null;
+  overdue_amount_pence?: number | null;
+  overdue_currency?: string | null;
   seat_limit?: number | null;
   seats_used?: number;
   device_limit?: number | null;
@@ -439,6 +443,21 @@ export default function AccountPage() {
 
       {error && <div className="account-message error">{error}</div>}
       {message && <div className="account-message success">{message}</div>}
+      {(subscription?.status === "grace_period" || subscription?.status === "past_due") && <div className="account-scheduled-change account-cancellation-notice">
+        <div>
+          <strong>Payment overdue</strong>
+          <span>
+            {subscription.overdue_amount_pence != null
+              ? `We couldn't collect your ${money(subscription.overdue_amount_pence)} subscription payment. `
+              : "We couldn't collect your subscription payment. "}
+            {subscription.next_payment_attempt_at
+              ? `We'll retry payment on ${dateLabel(subscription.next_payment_attempt_at)}. `
+              : "Stripe will retry payment according to your billing retry schedule. "}
+            Your grace period ends on {dateLabel(subscription.grace_ends_at)}. FAST will remain available during the grace period. If payment is not recovered before it ends, your subscription will be cancelled and licensed access will stop.
+          </span>
+        </div>
+        <button className="button button-primary button-small" type="button" disabled={working || !subscription.can_manage_billing} onClick={manageBilling}>Fix payment</button>
+      </div>}
       {subscription?.cancel_at_period_end && <div className="account-scheduled-change account-cancellation-notice">
         <div>
           <strong>Subscription cancellation scheduled</strong>

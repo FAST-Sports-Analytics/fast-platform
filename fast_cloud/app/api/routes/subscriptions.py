@@ -400,6 +400,22 @@ def subscription_payload(db: Session, organisation_id: int, *, refresh_provider:
                     _revoke_subscription_entitlements(db, organisation, ended_at=period_end)
                 item.updated_at = datetime.now(timezone.utc)
 
+            # Payment-failure grace must use Stripe provider time as well. Test
+            # Clocks can be weeks ahead of Railway's wall clock, so comparing
+            # grace_ends_at only with datetime.now() leaves sandbox organisations
+            # licensed indefinitely after their simulated grace period expires.
+            grace_end = item.grace_ends_at
+            if grace_end and grace_end.tzinfo is None:
+                grace_end = grace_end.replace(tzinfo=timezone.utc)
+            if item.status in {"grace_period", "past_due"} and grace_end and provider_now >= grace_end:
+                item.status = "cancelled"
+                item.cancel_at_period_end = False
+                item.grace_ends_at = None
+                organisation = db.get(Organisation, organisation_id)
+                if organisation:
+                    _revoke_subscription_entitlements(db, organisation, ended_at=grace_end)
+                item.updated_at = datetime.now(timezone.utc)
+
             # get_db() does not auto-commit on request completion. Persist the
             # provider reconciliation performed by this explicit refresh so the
             # next Launcher request sees the same cancellation state.
@@ -457,6 +473,32 @@ def subscription_payload(db: Session, organisation_id: int, *, refresh_provider:
     )
     billing_ready = bool(item.billing_provider == "stripe" and item.external_customer_id and _stripe_ready())
 
+    next_payment_attempt_at = None
+    overdue_amount_pence = None
+    overdue_currency = None
+    if status in {"grace_period", "past_due"} and billing_ready and item.external_subscription_id:
+        try:
+            _configure_stripe()
+            remote_for_invoice = stripe.Subscription.retrieve(
+                item.external_subscription_id,
+                expand=["latest_invoice"],
+            )
+            latest_invoice = _obj_get(remote_for_invoice, "latest_invoice")
+            if isinstance(latest_invoice, str) and latest_invoice:
+                latest_invoice = stripe.Invoice.retrieve(latest_invoice)
+            if latest_invoice:
+                next_payment_attempt_at = _stripe_datetime(_obj_get(latest_invoice, "next_payment_attempt"))
+                amount_remaining = _obj_get(latest_invoice, "amount_remaining")
+                if amount_remaining is None:
+                    amount_remaining = _obj_get(latest_invoice, "amount_due")
+                if amount_remaining is not None:
+                    overdue_amount_pence = int(amount_remaining)
+                overdue_currency = str(_obj_get(latest_invoice, "currency", "") or "").upper() or None
+        except Exception:
+            # The grace deadline remains authoritative even if invoice display
+            # metadata cannot be refreshed temporarily.
+            pass
+
     # Stripe quantity scales plan capacity. ``seat_override`` stores the paid
     # user capacity after each Stripe sync; derive the matching device capacity
     # from the plan's base bundle so all API/UI checks use the same allowance.
@@ -493,6 +535,9 @@ def subscription_payload(db: Session, organisation_id: int, *, refresh_provider:
         "current_period_ends_at": item.current_period_ends_at.isoformat() if item.current_period_ends_at else None,
         "cancel_at_period_end": bool(item.cancel_at_period_end),
         "grace_ends_at": item.grace_ends_at.isoformat() if item.grace_ends_at else None,
+        "next_payment_attempt_at": next_payment_attempt_at.isoformat() if next_payment_attempt_at else None,
+        "overdue_amount_pence": overdue_amount_pence,
+        "overdue_currency": overdue_currency,
         "billing_provider": item.billing_provider,
         "seat_override": item.seat_override,
         "seat_limit": seat_limit,
