@@ -48,6 +48,29 @@ type UserInfo = {
   organisation_admin?: boolean;
 };
 
+type OrganisationManagementUser = {
+  id: number;
+  full_name?: string;
+  email: string;
+  role?: string;
+  status: string;
+  products?: string[];
+  sports?: string[];
+};
+
+type OrganisationManagementDevice = {
+  id: number;
+  device_id: string;
+  device_name?: string;
+  active: boolean;
+  last_seen_at?: string | null;
+};
+
+type OrganisationManagementOverview = {
+  users?: OrganisationManagementUser[];
+  devices?: OrganisationManagementDevice[];
+};
+
 type PlanChangePreview = {
   change: "upgrade" | "downgrade" | "unchanged";
   effective: "now" | "period_end";
@@ -97,6 +120,10 @@ export default function AccountPage() {
   const [error, setError] = useState("");
   const [planPreview, setPlanPreview] = useState<PlanChangePreview | null>(null);
   const [cancelScheduledChangeOpen, setCancelScheduledChangeOpen] = useState(false);
+  const [capacityManagerOpen, setCapacityManagerOpen] = useState(false);
+  const [capacityOverview, setCapacityOverview] = useState<OrganisationManagementOverview | null>(null);
+  const [selectedUserIds, setSelectedUserIds] = useState<number[]>([]);
+  const [selectedDeviceIds, setSelectedDeviceIds] = useState<number[]>([]);
 
   function token() {
     return typeof window === "undefined" ? "" : window.sessionStorage.getItem("fast_access_token") || "";
@@ -240,6 +267,68 @@ export default function AccountPage() {
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "FAST Cloud could not preview your plan change.");
+    } finally {
+      setWorking(false);
+    }
+  }
+
+  async function openCapacityManager() {
+    if (!planPreview) return;
+    setWorking(true);
+    setError("");
+    try {
+      const overview = await api("/api/v1/organisation-management");
+      setCapacityOverview(overview as OrganisationManagementOverview);
+      setSelectedUserIds([]);
+      setSelectedDeviceIds([]);
+      setCapacityManagerOpen(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "FAST Cloud could not load your licensed users and devices.");
+    } finally {
+      setWorking(false);
+    }
+  }
+
+  async function applyCapacityChanges() {
+    if (!planPreview || !capacityOverview) return;
+    const usersToRelease = Math.max(0, (planPreview.current_seats_used || 0) - (planPreview.target_seat_limit || 0));
+    const devicesToRelease = Math.max(0, (planPreview.current_devices_used || 0) - (planPreview.target_device_limit || 0));
+    if (selectedUserIds.length < usersToRelease || selectedDeviceIds.length < devicesToRelease) return;
+
+    setWorking(true);
+    setError("");
+    try {
+      for (const userId of selectedUserIds) {
+        const target = (capacityOverview.users || []).find(item => item.id === userId);
+        if (!target) continue;
+        await api(`/api/v1/organisation-management/users/${userId}`, {
+          method: "PATCH",
+          body: JSON.stringify({
+            full_name: target.full_name || target.email,
+            role: target.role || "analyst",
+            status: "suspended",
+            products: target.products || [],
+            sports: target.sports || [],
+          }),
+        });
+      }
+      for (const deviceId of selectedDeviceIds) {
+        await api(`/api/v1/organisation-management/devices/${deviceId}/deactivate`, { method: "POST" });
+      }
+
+      const preview = await api("/api/v1/subscriptions/change-plan/preview", {
+        method: "POST",
+        body: JSON.stringify({ plan_id: planPreview.target_plan.id, billing_interval: planPreview.target_billing_interval }),
+      });
+      setPlanPreview(preview as PlanChangePreview);
+      setCapacityManagerOpen(false);
+      setCapacityOverview(null);
+      setSelectedUserIds([]);
+      setSelectedDeviceIds([]);
+      await load();
+      setMessage("Licence usage updated. Review the downgrade details, then confirm when ready.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "FAST Cloud could not update your licence usage.");
     } finally {
       setWorking(false);
     }
@@ -466,11 +555,11 @@ export default function AccountPage() {
 
         <div className="account-modal-actions">
           <button className="button button-quiet" type="button" disabled={working} onClick={() => setPlanPreview(null)}>Cancel</button>
-          <button className="button button-primary" type="button" disabled={working || Boolean(planPreview.change === "downgrade" && planPreview.downgrade_blocked)} onClick={confirmPlanChange}>{
+          <button className="button button-primary" type="button" disabled={working} onClick={planPreview.change === "downgrade" && planPreview.downgrade_blocked ? openCapacityManager : confirmPlanChange}>{
             working
               ? "Processing…"
               : planPreview.change === "downgrade" && planPreview.downgrade_blocked
-                ? "Reduce usage to continue"
+                ? "Choose licences to remove"
                 : billingIntervalOnlyChange
                   ? `Confirm switch to ${planPreview.target_billing_interval === "annual" ? "annual" : "monthly"} billing`
                   : planPreview.change === "downgrade"
@@ -479,6 +568,53 @@ export default function AccountPage() {
           }</button>
         </div>
         <p className="account-confirm-footnote">Billing is handled securely by Stripe. The final amount can vary slightly if taxes, discounts or exchange-rate adjustments apply.</p>
+      </section>
+    </div>}
+
+    {capacityManagerOpen && planPreview && capacityOverview && <div className="account-modal-backdrop" role="presentation">
+      <section className="account-modal" role="dialog" aria-modal="true" aria-labelledby="capacity-manager-title">
+        <button className="account-modal-close" type="button" disabled={working} onClick={() => setCapacityManagerOpen(false)} aria-label="Close">×</button>
+        <p className="eyebrow">MANAGE DOWNGRADE LIMITS</p>
+        <h2 id="capacity-manager-title">Choose access to remove</h2>
+        <p className="account-confirm-copy">FAST {planPreview.target_plan.name} includes {planPreview.target_seat_limit} licensed users and {planPreview.target_device_limit} active devices. Choose which access should be suspended before the downgrade is scheduled. Accounts and local data are not deleted.</p>
+
+        {(planPreview.current_seats_used || 0) > (planPreview.target_seat_limit || 0) && <div className="account-capacity-section">
+          <h3>Licensed users</h3>
+          <p>Select exactly {(planPreview.current_seats_used || 0) - (planPreview.target_seat_limit || 0)} user(s) to suspend. Your own administrator access cannot be selected.</p>
+          <div className="account-capacity-list">
+            {(capacityOverview.users || []).filter(item => ["active", "invited"].includes(String(item.status || "").toLowerCase())).map(item => {
+              const isSelf = item.email.toLowerCase() === String(user.email || "").toLowerCase();
+              const checked = selectedUserIds.includes(item.id);
+              const required = (planPreview.current_seats_used || 0) - (planPreview.target_seat_limit || 0);
+              const atLimit = selectedUserIds.length >= required && !checked;
+              return <label key={item.id} className={`account-capacity-row${isSelf ? " protected" : ""}`}>
+                <input type="checkbox" checked={checked} disabled={working || isSelf || atLimit} onChange={() => setSelectedUserIds(ids => checked ? ids.filter(id => id !== item.id) : [...ids, item.id])} />
+                <span><strong>{item.full_name || item.email}</strong><small>{item.email} · {(item.role || "user").replace(/^./, c => c.toUpperCase())}{isSelf ? " · Your administrator account" : ""}</small></span>
+              </label>;
+            })}
+          </div>
+        </div>}
+
+        {(planPreview.current_devices_used || 0) > (planPreview.target_device_limit || 0) && <div className="account-capacity-section">
+          <h3>Active devices</h3>
+          <p>Select exactly {(planPreview.current_devices_used || 0) - (planPreview.target_device_limit || 0)} device(s) to deactivate.</p>
+          <div className="account-capacity-list">
+            {(capacityOverview.devices || []).filter(item => item.active).map(item => {
+              const checked = selectedDeviceIds.includes(item.id);
+              const required = (planPreview.current_devices_used || 0) - (planPreview.target_device_limit || 0);
+              const atLimit = selectedDeviceIds.length >= required && !checked;
+              return <label key={item.id} className="account-capacity-row">
+                <input type="checkbox" checked={checked} disabled={working || atLimit} onChange={() => setSelectedDeviceIds(ids => checked ? ids.filter(id => id !== item.id) : [...ids, item.id])} />
+                <span><strong>{item.device_name || item.device_id}</strong><small>{item.last_seen_at ? `Last seen ${dateLabel(item.last_seen_at)}` : item.device_id}</small></span>
+              </label>;
+            })}
+          </div>
+        </div>}
+
+        <div className="account-modal-actions">
+          <button className="button button-quiet" type="button" disabled={working} onClick={() => setCapacityManagerOpen(false)}>Back</button>
+          <button className="button button-primary" type="button" disabled={working || selectedUserIds.length < Math.max(0, (planPreview.current_seats_used || 0) - (planPreview.target_seat_limit || 0)) || selectedDeviceIds.length < Math.max(0, (planPreview.current_devices_used || 0) - (planPreview.target_device_limit || 0))} onClick={applyCapacityChanges}>{working ? "Applying…" : "Apply licence changes"}</button>
+        </div>
       </section>
     </div>}
   </main>;
