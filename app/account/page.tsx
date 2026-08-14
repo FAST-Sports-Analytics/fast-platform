@@ -147,6 +147,14 @@ export default function AccountPage() {
       router.replace("/login");
       return;
     }
+    const checkoutResult = new URLSearchParams(window.location.search).get("checkout");
+    if (checkoutResult === "success") {
+      setMessage("Payment received. Stripe is confirming your FAST subscription; your account will update automatically.");
+      window.history.replaceState({}, "", "/account");
+    } else if (checkoutResult === "cancelled") {
+      setMessage("Checkout cancelled. No payment was taken; you can choose a plan whenever you are ready.");
+      window.history.replaceState({}, "", "/account");
+    }
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [router]);
@@ -179,7 +187,28 @@ export default function AccountPage() {
     : "";
 
   async function changePlan(plan: Plan, interval: "monthly" | "annual") {
-    if (!subscription?.plan) return;
+    // Organisations without a subscription use Stripe Checkout for their first
+    // purchase. Existing subscribers continue through the plan-change preview
+    // flow so upgrades/downgrades retain their current proration behaviour.
+    if (!subscription?.plan) {
+      setWorking(true);
+      setMessage("");
+      setError("");
+      try {
+        const data = await api("/api/v1/subscriptions/checkout", {
+          method: "POST",
+          body: JSON.stringify({ plan_id: plan.id, billing_interval: interval }),
+        });
+        if (!data.url) throw new Error("Stripe Checkout did not return a payment URL.");
+        window.location.assign(data.url);
+        return;
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "FAST Cloud could not start checkout.");
+      } finally {
+        setWorking(false);
+      }
+      return;
+    }
     const samePlan = currentPlanId === plan.id;
     const sameInterval = subscription.billing_interval === interval;
     if (samePlan && sameInterval) return;

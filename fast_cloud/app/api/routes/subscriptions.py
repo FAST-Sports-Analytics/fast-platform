@@ -754,8 +754,11 @@ def create_checkout_session(payload: CheckoutRequest, user: User = Depends(get_c
     params = {
         "mode": "subscription",
         "line_items": [{"price": str(_obj_get(price, "id")), "quantity": 1}],
-        "success_url": f"{settings.public_app_url.rstrip('/')}/pricing?checkout=success",
-        "cancel_url": f"{settings.public_app_url.rstrip('/')}/pricing?checkout=cancelled",
+        # Authenticated first-subscription checkout returns to the customer's
+        # account page. Public /pricing checkout remains a separate onboarding
+        # flow for organisations/users that do not exist yet.
+        "success_url": f"{settings.public_app_url.rstrip('/')}/account?checkout=success",
+        "cancel_url": f"{settings.public_app_url.rstrip('/')}/account?checkout=cancelled",
         "client_reference_id": str(organisation_id),
         "metadata": metadata,
         "subscription_data": {"metadata": metadata},
