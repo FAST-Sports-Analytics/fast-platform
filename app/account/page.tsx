@@ -42,6 +42,23 @@ type UserInfo = {
   organisation_admin?: boolean;
 };
 
+type PlanChangePreview = {
+  change: "upgrade" | "downgrade" | "unchanged";
+  effective: "now" | "period_end";
+  effective_at?: string | null;
+  current_plan?: Plan | null;
+  target_plan: Plan;
+  current_billing_interval?: "monthly" | "annual";
+  target_billing_interval: "monthly" | "annual";
+  amount_due_now_pence?: number;
+  credit_pence?: number;
+  upgrade_charge_pence?: number;
+  next_renewal_amount_pence?: number;
+  next_renewal_at?: string | null;
+  currency?: string;
+  proration_date?: number | null;
+};
+
 function apiBase() {
   return (process.env.NEXT_PUBLIC_FAST_CLOUD_URL || "http://127.0.0.1:8766").replace(/\/+$/, "");
 }
@@ -66,6 +83,7 @@ export default function AccountPage() {
   const [working, setWorking] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const [planPreview, setPlanPreview] = useState<PlanChangePreview | null>(null);
 
   function token() {
     return typeof window === "undefined" ? "" : window.sessionStorage.getItem("fast_access_token") || "";
@@ -140,32 +158,49 @@ export default function AccountPage() {
     const sameInterval = subscription.billing_interval === interval;
     if (samePlan && sameInterval) return;
 
-    const targetPrice = interval === "annual" ? plan.annual_price_pence : plan.monthly_price_pence;
-    const currentAmount = subscription.billing_interval === "annual"
-      ? subscription.plan.annual_price_pence
-      : subscription.plan.monthly_price_pence;
-    const downgrade = targetPrice < currentAmount;
-    const wording = downgrade
-      ? `Change to FAST ${plan.name} at the end of the current paid period? Your current access stays active until renewal.`
-      : `Change to FAST ${plan.name} now? Stripe will apply any applicable proration.`;
+    setWorking(true);
+    setMessage("");
+    setError("");
+    try {
+      const preview = await api("/api/v1/subscriptions/change-plan/preview", {
+        method: "POST",
+        body: JSON.stringify({ plan_id: plan.id, billing_interval: interval }),
+      });
+      if (preview.change === "unchanged") {
+        setMessage("Your subscription is already on that plan and billing interval.");
+      } else {
+        setPlanPreview(preview as PlanChangePreview);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "FAST Cloud could not preview your plan change.");
+    } finally {
+      setWorking(false);
+    }
+  }
 
-    if (!window.confirm(wording)) return;
+  async function confirmPlanChange() {
+    if (!planPreview) return;
     setWorking(true);
     setMessage("");
     setError("");
     try {
       const data = await api("/api/v1/subscriptions/change-plan", {
         method: "POST",
-        body: JSON.stringify({ plan_id: plan.id, billing_interval: interval }),
+        body: JSON.stringify({
+          plan_id: planPreview.target_plan.id,
+          billing_interval: planPreview.target_billing_interval,
+          proration_date: planPreview.proration_date || undefined,
+        }),
       });
       if (data.effective === "period_end") {
-        setMessage(`Downgrade scheduled. FAST ${plan.name} will take effect on ${dateLabel(data.effective_at)}. Your current access remains active until then.`);
+        setMessage(`Downgrade scheduled. FAST ${planPreview.target_plan.name} will take effect on ${dateLabel(data.effective_at)}. Your current access remains active until then.`);
       } else if (data.change === "unchanged") {
         setMessage("Your subscription is already on that plan and billing interval.");
       } else {
-        setMessage(`Your organisation is now on FAST ${plan.name}. Launcher entitlements will refresh automatically.`);
+        setMessage(`Your organisation is now on FAST ${planPreview.target_plan.name}. Launcher entitlements will refresh automatically.`);
         await load();
       }
+      setPlanPreview(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "FAST Cloud could not change your plan.");
     } finally {
@@ -255,5 +290,42 @@ export default function AccountPage() {
         </section>
       </>}
     </div>
+
+    {planPreview && <div className="account-modal-backdrop" role="presentation" onMouseDown={() => !working && setPlanPreview(null)}>
+      <section className="account-modal" role="dialog" aria-modal="true" aria-labelledby="plan-change-title" onMouseDown={event => event.stopPropagation()}>
+        <button className="account-modal-close" type="button" aria-label="Close" disabled={working} onClick={() => setPlanPreview(null)}>×</button>
+        <p className="eyebrow">Confirm plan change</p>
+        <h2 id="plan-change-title">{planPreview.change === "downgrade" ? "Schedule your downgrade" : `Upgrade to FAST ${planPreview.target_plan.name}`}</h2>
+
+        <div className="account-confirm-plans">
+          <article><small>Current</small><strong>FAST {planPreview.current_plan?.name || subscription?.plan?.name}</strong><span>{planPreview.current_billing_interval === "annual" ? `${money(planPreview.current_plan?.annual_price_pence || 0)}/year` : `${money(planPreview.current_plan?.monthly_price_pence || 0)}/month`}</span></article>
+          <div className="account-confirm-arrow">→</div>
+          <article><small>New</small><strong>FAST {planPreview.target_plan.name}</strong><span>{planPreview.target_billing_interval === "annual" ? `${money(planPreview.target_plan.annual_price_pence)}/year` : `${money(planPreview.target_plan.monthly_price_pence)}/month`}</span></article>
+        </div>
+
+        {planPreview.change === "upgrade" ? <>
+          <div className="account-confirm-summary">
+            <div><span>Unused-plan credit</span><strong>{money(planPreview.credit_pence || 0)}</strong></div>
+            <div><span>Professional access for the remaining period</span><strong>{money(planPreview.upgrade_charge_pence || 0)}</strong></div>
+            <div className="total"><span>Estimated amount due now</span><strong>{money(planPreview.amount_due_now_pence || 0)}</strong></div>
+            <div><span>Next renewal</span><strong>{money(planPreview.next_renewal_amount_pence || 0)} on {dateLabel(planPreview.next_renewal_at)}</strong></div>
+          </div>
+          <p className="account-confirm-copy">Stripe calculates the exact proration. Your unused FAST {planPreview.current_plan?.name || "current plan"} time is credited against the upgrade, and the new plan becomes available immediately after the billing change succeeds.</p>
+        </> : <>
+          <div className="account-confirm-summary">
+            <div className="total"><span>Amount due now</span><strong>{money(0)}</strong></div>
+            <div><span>FAST {planPreview.target_plan.name} starts</span><strong>{dateLabel(planPreview.effective_at)}</strong></div>
+            <div><span>New renewal price</span><strong>{money(planPreview.next_renewal_amount_pence || 0)}/{planPreview.target_billing_interval === "annual" ? "year" : "month"}</strong></div>
+          </div>
+          <p className="account-confirm-copy">You keep your current FAST {planPreview.current_plan?.name || "plan"} access until the end of the paid period. After that, your limits and product access change to FAST {planPreview.target_plan.name}; installed applications and local data are not deleted.</p>
+        </>}
+
+        <div className="account-modal-actions">
+          <button className="button button-quiet" type="button" disabled={working} onClick={() => setPlanPreview(null)}>Cancel</button>
+          <button className="button button-primary" type="button" disabled={working} onClick={confirmPlanChange}>{working ? "Processing…" : planPreview.change === "downgrade" ? `Confirm downgrade to FAST ${planPreview.target_plan.name}` : `Confirm upgrade to FAST ${planPreview.target_plan.name}`}</button>
+        </div>
+        <p className="account-confirm-footnote">Billing is handled securely by Stripe. The final amount can vary slightly if taxes, discounts or exchange-rate adjustments apply.</p>
+      </section>
+    </div>}
   </main>;
 }
