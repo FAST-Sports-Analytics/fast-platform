@@ -1003,12 +1003,23 @@ def _ensure_subscription_entitlements(
     # updating only the first club/latest licence can leave the licence actually
     # used by Launcher on the old tier.  Synchronise every current club-owned
     # licence for this organisation, while still creating one when none exists.
-    organisation_licences = db.scalars(
-        select(Licence)
-        .join(Club, Club.id == Licence.club_id)
-        .where(Club.organisation_id == organisation.id, Licence.owner_type == "club")
-        .order_by(Licence.id.desc())
-    ).all()
+    # Resolve the organisation's club ids first, then update licences directly by
+    # their FK.  This deliberately mirrors the licence ownership chain used by
+    # /licenses/current (Licence.club_id -> Club.organisation_id) and avoids a
+    # joined ORM query silently missing an already-activated legacy licence.
+    organisation_club_ids = list(db.scalars(
+        select(Club.id).where(Club.organisation_id == organisation.id).order_by(Club.id)
+    ).all())
+    organisation_licences = []
+    if organisation_club_ids:
+        organisation_licences = list(db.scalars(
+            select(Licence)
+            .where(
+                Licence.club_id.in_(organisation_club_ids),
+                func.lower(func.trim(Licence.owner_type)) == "club",
+            )
+            .order_by(Licence.id.desc())
+        ).all())
     if not organisation_licences:
         code = generate_licence_code(plan.name)
         licence = Licence(
