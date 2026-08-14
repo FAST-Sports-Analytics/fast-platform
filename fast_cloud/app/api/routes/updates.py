@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_current_user
 from app.core.storage import release_packages_dir
 from app.core.entitlements import filter_products, normalise_product, licence_is_current
+from app.core.subscription_access import organisation_subscription_access
 from app.db.session import get_db
 from app.models import AuditLog, Club, ClubMember, DeviceActivation, DeviceAuditLog, Licence, Release, RemoteCommand, User
 
@@ -29,7 +30,14 @@ def _normalise_product(value: str) -> str:
     return normalise_product(value)
 
 
-def _licensed_components(user: User, device: DeviceActivation | None) -> set[str]:
+def _licensed_components(db: Session, user: User, device: DeviceActivation | None) -> set[str]:
+    # Update/release APIs are part of the Launcher entitlement surface.  Never
+    # expose paid components when the organisation subscription is blocked, even
+    # if an older device activation or licence row is still locally/currently valid.
+    subscription_access = organisation_subscription_access(db, user.organisation_id)
+    if not subscription_access.allowed:
+        return {"launcher"}
+
     licence = device.licence if device is not None else None
     if licence is None:
         active = [item for item in user.licences if item.status == "active"]
@@ -141,7 +149,7 @@ def update_manifest(
         effective_ring = (device.deployment_ring or (device.licence.club.organisation.deployment_ring if device.licence.club and device.licence.club.organisation else None) or "production").lower()
     if effective_ring not in DEPLOYMENT_RINGS:
         effective_ring = "production"
-    licensed_components = _licensed_components(user, device)
+    licensed_components = _licensed_components(db, user, device)
     # Release rows created by older FAST Cloud builds may contain the display
     # value ``alpha`` instead of the canonical database value ``internal``,
     # mixed-case deployment-ring values, or a NULL ring.  The Admin portal
@@ -253,7 +261,7 @@ def report_product_inventory(
     db.commit()
     return {
         "status": "recorded",
-        "licensed_products": sorted(_licensed_components(user, device) - {"launcher"}),
+        "licensed_products": sorted(_licensed_components(db, user, device) - {"launcher"}),
         "products": normalised,
     }
 

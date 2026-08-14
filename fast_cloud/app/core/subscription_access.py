@@ -99,4 +99,17 @@ def organisation_subscription_access(db: Session, organisation_id: int | None) -
     if organisation_id is None:
         return SubscriptionAccess("not_applicable", True, False, "not_applicable", "Subscription enforcement does not apply to this account.")
     item = db.scalar(select(OrganisationSubscription).where(OrganisationSubscription.organisation_id == organisation_id))
-    return evaluate_subscription(item)
+    access = evaluate_subscription(item)
+
+    # Materialise time-based expiry so every caller sees the same authoritative
+    # commercial state.  Stripe webhooks establish the grace deadline, but no
+    # webhook is guaranteed to arrive at the exact instant that deadline passes.
+    # The first authenticated FAST request after expiry therefore closes the
+    # grace period server-side instead of leaving a stale ``grace_period`` row.
+    if item is not None and access.reason in {"grace_expired", "trial_expired"}:
+        stored_status = str(item.status or "").strip().lower()
+        if stored_status != "expired":
+            item.status = "expired"
+            db.commit()
+
+    return access
