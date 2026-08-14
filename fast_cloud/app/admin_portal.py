@@ -19,7 +19,7 @@ from jwt import InvalidTokenError
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
-from app.core.seats import effective_user_seat_limit, organisation_device_capacity
+from app.core.seats import ALLOCATED_USER_STATUSES, allocated_user_count, effective_user_seat_limit, organisation_device_capacity
 from app.core.security import (
     create_access_token,
     decode_token,
@@ -665,9 +665,7 @@ def organisation_profile(
         raise HTTPException(status_code=404, detail="Organisation not found")
     unassigned_clubs = db.scalars(select(Club).where(Club.organisation_id.is_(None)).order_by(Club.name)).all()
     licence_ids = [licence.id for club in organisation.clubs for licence in club.licences]
-    member_ids = {membership.user_id for club in organisation.clubs for membership in club.members}
     organisation_users = db.scalars(select(User).where(User.organisation_id == organisation.id).order_by(User.full_name, User.email)).all()
-    member_ids.update(user.id for user in organisation_users)
     selected_sports = json.loads(getattr(organisation, "sports_json", "[]") or "[]")
     all_sports = db.scalars(select(Sport).where(Sport.active.is_(True)).order_by(Sport.name)).all()
     active_devices = 0
@@ -684,11 +682,33 @@ def organisation_profile(
     # portal reflects the effective subscription/licence limits instead of
     # falling back to an em dash when no explicit template context is supplied.
     seat_limit = effective_user_seat_limit(db, organisation)
+    seats_used = allocated_user_count(db, organisation.id)
     device_capacity = organisation_device_capacity(organisation)
+
+    # Build the seat-holder table from the same active/invited status rules used
+    # by enforcement. Removed/suspended users remain visible in the access table
+    # for auditability, but they must not consume a licensed seat.
+    licensed_users = []
+    candidate_users: dict[int, User] = {user.id: user for user in organisation_users}
+    for club in organisation.clubs:
+        for membership in club.members:
+            candidate_users[membership.user_id] = membership.user
+    for candidate in sorted(candidate_users.values(), key=lambda item: ((item.full_name or '').lower(), item.email.lower())):
+        if str(candidate.status or '').lower() not in ALLOCATED_USER_STATUSES:
+            continue
+        direct = candidate.organisation_id == organisation.id
+        memberships = [
+            membership for membership in candidate.club_memberships
+            if membership.club and membership.club.organisation_id == organisation.id
+        ]
+        if direct or memberships:
+            licensed_users.append({"user": candidate, "direct": direct, "memberships": memberships})
+
     return templates.TemplateResponse(request, "organisation_profile.html", {
         "admin": admin, "organisation": organisation, "unassigned_clubs": unassigned_clubs if admin.organisation_id is None else [],
-        "active_devices": active_devices, "seats_used": len(member_ids),
+        "active_devices": active_devices, "seats_used": seats_used,
         "seat_limit": seat_limit, "device_capacity": device_capacity,
+        "licensed_users": licensed_users,
         "selected_sports": selected_sports, "all_sports": all_sports, "organisation_users": organisation_users,
         "organisation_devices": organisation_devices, "organisation_audit": organisation_audit,
         "licence_products": licence_products, "licence_sports": licence_sports,

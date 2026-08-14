@@ -546,8 +546,16 @@ def assign_plan(payload: AssignmentRequest, user: User = Depends(get_current_use
     item.billing_interval = payload.billing_interval if payload.billing_interval in {"monthly", "annual", "manual"} else "monthly"
     item.seat_override = payload.seat_override
     item.updated_at = datetime.now(timezone.utc)
+    effective_seat_limit = max(1, int(payload.seat_override or plan.included_seats or 1))
     organisation.subscription_tier = plan.name
-    organisation.max_seats = payload.seat_override or plan.included_seats
+    organisation.max_seats = effective_seat_limit
+    # Keep the organisation's licence-backed desktop entitlements in lock-step
+    # with an administrative plan assignment.  The Launcher authenticates
+    # against Licence rows, so changing only the subscription row leaves stale
+    # Starter products/device limits after a Starter -> Professional upgrade.
+    _ensure_subscription_entitlements(
+        db, organisation, plan, quantity=1, seat_limit=effective_seat_limit
+    )
     db.add(AuditLog(admin_user_id=user.id, action="subscription_assigned", category="billing", target_type="organisation", target_id=organisation.id, target_label=organisation.name, details=f"Assigned {plan.name} ({item.billing_interval})."))
     db.commit()
     return {"subscription": subscription_payload(db, organisation.id)}
@@ -946,7 +954,7 @@ def _subscription_cancellation_scheduled(subscription) -> bool:
 
 
 def _ensure_subscription_entitlements(
-    db: Session, organisation: Organisation, plan: SubscriptionPlan, *, quantity: int = 1
+    db: Session, organisation: Organisation, plan: SubscriptionPlan, *, quantity: int = 1, seat_limit: int | None = None
 ) -> None:
     """Materialise plan entitlements as the organisation's managed club licence.
 
@@ -964,8 +972,15 @@ def _ensure_subscription_entitlements(
     selected_sports = organisation_sports or plan_sports
 
     quantity = max(1, int(quantity or 1))
-    licensed_users = max(1, int(plan.included_seats or 1)) * quantity
-    licensed_devices = max(1, int(plan.max_devices or 1)) * quantity
+    base_seats = max(1, int(plan.included_seats or 1))
+    base_devices = max(1, int(plan.max_devices or 1))
+    if seat_limit is None:
+        licensed_users = base_seats * quantity
+        capacity_multiplier = quantity
+    else:
+        licensed_users = max(1, int(seat_limit))
+        capacity_multiplier = max(1, (licensed_users + base_seats - 1) // base_seats)
+    licensed_devices = base_devices * capacity_multiplier
 
     organisation.subscription_tier = plan.name
     organisation.max_seats = licensed_users
