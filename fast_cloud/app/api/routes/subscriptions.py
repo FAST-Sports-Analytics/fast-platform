@@ -17,7 +17,7 @@ from app.core.email import EmailDeliveryError, branded_action_email, send_email
 from app.core.rate_limit import RateLimit, client_address, limiter
 from app.core.security import generate_licence_code, hash_licence_code, hash_password, normalise_licence_code
 from app.db.session import SessionLocal, get_db
-from app.models import AuditLog, BillingWebhookEvent, Club, ClubMember, Licence, Organisation, OrganisationSubscription, Sport, SubscriptionPlan, User
+from app.models import AuditLog, BillingWebhookEvent, Club, ClubMember, DeviceActivation, Licence, Organisation, OrganisationSubscription, Sport, SubscriptionPlan, User
 
 try:
     import stripe
@@ -457,6 +457,75 @@ def subscription_payload(db: Session, organisation_id: int, *, refresh_provider:
         "plan": effective_plan,
     }
 
+
+def _organisation_active_device_count(db: Session, organisation_id: int) -> int:
+    """Count active devices attached to any licence owned by this organisation."""
+    club_device_ids = set(
+        db.scalars(
+            select(DeviceActivation.id)
+            .join(Licence, Licence.id == DeviceActivation.licence_id)
+            .join(Club, Club.id == Licence.club_id)
+            .where(
+                Club.organisation_id == organisation_id,
+                DeviceActivation.active.is_(True),
+            )
+        ).all()
+    )
+    direct_device_ids = set(
+        db.scalars(
+            select(DeviceActivation.id)
+            .join(Licence, Licence.id == DeviceActivation.licence_id)
+            .join(User, User.id == Licence.user_id)
+            .where(
+                User.organisation_id == organisation_id,
+                DeviceActivation.active.is_(True),
+            )
+        ).all()
+    )
+    return len(club_device_ids | direct_device_ids)
+
+
+def _downgrade_capacity_payload(
+    db: Session,
+    organisation_id: int,
+    target: SubscriptionPlan,
+) -> dict:
+    """Describe whether current organisation usage fits inside the target plan."""
+    from app.core.seats import allocated_user_count
+
+    seats_used = int(allocated_user_count(db, organisation_id))
+    devices_used = int(_organisation_active_device_count(db, organisation_id))
+    seat_limit = max(1, int(target.included_seats or 1))
+    device_limit = max(1, int(target.max_devices or 1))
+
+    blockers: list[str] = []
+    if seats_used > seat_limit:
+        remove_count = seats_used - seat_limit
+        blockers.append(
+            f"FAST {target.name} includes {seat_limit} licensed user"
+            f"{'s' if seat_limit != 1 else ''}, but your organisation currently uses {seats_used}. "
+            f"Remove or deactivate {remove_count} licensed user"
+            f"{'s' if remove_count != 1 else ''} before scheduling this downgrade."
+        )
+    if devices_used > device_limit:
+        remove_count = devices_used - device_limit
+        blockers.append(
+            f"FAST {target.name} allows {device_limit} active device"
+            f"{'s' if device_limit != 1 else ''}, but your organisation currently uses {devices_used}. "
+            f"Deactivate {remove_count} device"
+            f"{'s' if remove_count != 1 else ''} before scheduling this downgrade."
+        )
+
+    return {
+        "downgrade_blocked": bool(blockers),
+        "downgrade_blockers": blockers,
+        "current_seats_used": seats_used,
+        "target_seat_limit": seat_limit,
+        "current_devices_used": devices_used,
+        "target_device_limit": device_limit,
+    }
+
+
 def _scheduled_plan_change_payload(db: Session, item: OrganisationSubscription) -> dict | None:
     """Return FAST's pending period-end subscription change, if any.
 
@@ -873,7 +942,15 @@ def preview_subscription_plan_change(payload: ChangePlanRequest, user: User = De
             "currency": settings.billing_currency.lower(),
         }
         if is_downgrade:
-            return {**common, "amount_due_now_pence": 0, "credit_pence": 0, "upgrade_charge_pence": 0, "proration_date": None}
+            capacity = _downgrade_capacity_payload(db, organisation_id, target)
+            return {
+                **common,
+                **capacity,
+                "amount_due_now_pence": 0,
+                "credit_pence": 0,
+                "upgrade_charge_pence": 0,
+                "proration_date": None,
+            }
 
         proration_date = int(preview_now.timestamp())
         quantity = max(1, int(_obj_get(first_item, "quantity", 1) or 1))
@@ -948,6 +1025,16 @@ def change_subscription_plan(payload: ChangePlanRequest, user: User = Depends(ge
         metadata.update({"fast_organisation_id": str(organisation_id), "fast_plan_id": str(target.id), "fast_billing_interval": interval})
 
         if is_downgrade:
+            capacity = _downgrade_capacity_payload(db, organisation_id, target)
+            if capacity["downgrade_blocked"]:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "message": f"Your organisation does not currently fit within FAST {target.name} limits.",
+                        **capacity,
+                    },
+                )
+
             period_end = _subscription_period_end(current_sub)
             if not period_end:
                 raise HTTPException(status_code=409, detail="Stripe did not return the current billing period end")

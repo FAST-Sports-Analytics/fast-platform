@@ -63,6 +63,12 @@ type PlanChangePreview = {
   next_renewal_at?: string | null;
   currency?: string;
   proration_date?: number | null;
+  downgrade_blocked?: boolean;
+  downgrade_blockers?: string[];
+  current_seats_used?: number;
+  target_seat_limit?: number;
+  current_devices_used?: number;
+  target_device_limit?: number;
 };
 
 function apiBase() {
@@ -114,7 +120,13 @@ export default function AccountPage() {
       router.replace("/login");
       throw new Error("Your FAST Cloud session has ended. Please log in again.");
     }
-    if (!response.ok) throw new Error(data.detail || "FAST Cloud request failed.");
+    if (!response.ok) {
+      const detail = data.detail;
+      const message = typeof detail === "string"
+        ? detail
+        : detail?.message || (Array.isArray(detail?.downgrade_blockers) ? detail.downgrade_blockers.join(" ") : "");
+      throw new Error(message || "FAST Cloud request failed.");
+    }
     return data;
   }
 
@@ -441,21 +453,29 @@ export default function AccountPage() {
             <div><span>FAST {planPreview.target_plan.name} starts</span><strong>{dateLabel(planPreview.effective_at)}</strong></div>
             <div><span>New renewal price</span><strong>{money(planPreview.next_renewal_amount_pence || 0)}/{planPreview.target_billing_interval === "annual" ? "year" : "month"}</strong></div>
           </div>
+          {!billingIntervalOnlyChange && planPreview.downgrade_blocked && <div className="account-message error" role="alert">
+            <strong>Reduce usage before downgrading</strong>
+            {(planPreview.downgrade_blockers || []).map((blocker, index) => <p key={index}>{blocker}</p>)}
+          </div>}
           <p className="account-confirm-copy">{billingIntervalOnlyChange
             ? `You keep your current FAST ${planPreview.current_plan?.name || "plan"} access until the end of the paid ${planPreview.current_billing_interval} period. On ${dateLabel(planPreview.effective_at)}, your subscription switches to ${planPreview.target_billing_interval} billing at ${money(planPreview.next_renewal_amount_pence || 0)}/${planPreview.target_billing_interval === "annual" ? "year" : "month"}. Your products, seats, devices, installed applications and local data remain unchanged.`
-            : <>You keep your current FAST {planPreview.current_plan?.name || "plan"} access until the end of the paid period. After that, your limits and product access change to FAST {planPreview.target_plan.name}; installed applications and local data are not deleted.</>}</p>
+            : planPreview.downgrade_blocked
+              ? <>Your current FAST {planPreview.current_plan?.name || "plan"} remains unchanged. Reduce your licensed users/devices to the FAST {planPreview.target_plan.name} limits, then choose this downgrade again.</>
+              : <>You keep your current FAST {planPreview.current_plan?.name || "plan"} access until the end of the paid period. After that, your limits and product access change to FAST {planPreview.target_plan.name}; installed applications and local data are not deleted.</>}</p>
         </>}
 
         <div className="account-modal-actions">
           <button className="button button-quiet" type="button" disabled={working} onClick={() => setPlanPreview(null)}>Cancel</button>
-          <button className="button button-primary" type="button" disabled={working} onClick={confirmPlanChange}>{
+          <button className="button button-primary" type="button" disabled={working || Boolean(planPreview.change === "downgrade" && planPreview.downgrade_blocked)} onClick={confirmPlanChange}>{
             working
               ? "Processing…"
-              : billingIntervalOnlyChange
-                ? `Confirm switch to ${planPreview.target_billing_interval === "annual" ? "annual" : "monthly"} billing`
-                : planPreview.change === "downgrade"
-                  ? `Confirm downgrade to FAST ${planPreview.target_plan.name}`
-                  : `Confirm upgrade to FAST ${planPreview.target_plan.name}`
+              : planPreview.change === "downgrade" && planPreview.downgrade_blocked
+                ? "Reduce usage to continue"
+                : billingIntervalOnlyChange
+                  ? `Confirm switch to ${planPreview.target_billing_interval === "annual" ? "annual" : "monthly"} billing`
+                  : planPreview.change === "downgrade"
+                    ? `Confirm downgrade to FAST ${planPreview.target_plan.name}`
+                    : `Confirm upgrade to FAST ${planPreview.target_plan.name}`
           }</button>
         </div>
         <p className="account-confirm-footnote">Billing is handled securely by Stripe. The final amount can vary slightly if taxes, discounts or exchange-rate adjustments apply.</p>
