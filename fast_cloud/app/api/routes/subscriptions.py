@@ -1007,7 +1007,43 @@ def change_subscription_plan(payload: ChangePlanRequest, user: User = Depends(ge
         if payload.proration_date:
             update_params["proration_date"] = int(payload.proration_date)
         updated = stripe.Subscription.modify(item.external_subscription_id, **update_params)
-        _sync_stripe_subscription(db, updated, organisation_id_override=organisation_id)
+
+        # Stripe can leave upgrade prorations as pending invoice items even
+        # when the subscription update uses always_invoice. If that happens,
+        # explicitly invoice those pending items now so the customer pays only
+        # the net upgrade proration immediately and the next renewal remains a
+        # normal full-plan invoice.
+        customer_id = str(_obj_get(_obj_get(updated, "customer"), "id", _obj_get(updated, "customer", "")) or "").strip()
+        if customer_id:
+            pending = stripe.InvoiceItem.list(
+                customer=customer_id,
+                pending=True,
+                limit=100,
+            )
+            pending_items = list(_obj_get(pending, "data", []) or [])
+            upgrade_pending = [
+                invoice_item
+                for invoice_item in pending_items
+                if str(_obj_get(_obj_get(invoice_item, "subscription"), "id", _obj_get(invoice_item, "subscription", "")) or "").strip()
+                == item.external_subscription_id
+            ]
+            if upgrade_pending:
+                invoice = stripe.Invoice.create(
+                    customer=customer_id,
+                    subscription=item.external_subscription_id,
+                    auto_advance=True,
+                    description=f"FAST {target.name} upgrade proration",
+                )
+                invoice_id = str(_obj_get(invoice, "id", "") or "").strip()
+                if invoice_id:
+                    invoice = stripe.Invoice.finalize_invoice(invoice_id)
+                    status = str(_obj_get(invoice, "status", "") or "").lower()
+                    amount_due = int(_obj_get(invoice, "amount_due", 0) or 0)
+                    if amount_due > 0 and status not in {"paid", "void", "uncollectible"}:
+                        stripe.Invoice.pay(invoice_id)
+
+        refreshed = stripe.Subscription.retrieve(item.external_subscription_id, expand=["items.data.price"])
+        _sync_stripe_subscription(db, refreshed, organisation_id_override=organisation_id)
         db.add(AuditLog(admin_user_id=user.id, action="subscription_upgraded", category="billing", target_type="organisation", target_id=organisation_id, target_label=str(organisation_id), details=f"Changed to {target.name} ({interval})."))
         db.commit()
         return {"change": "upgrade", "effective": "now", "target_plan": plan_payload(target), "subscription": subscription_payload(db, organisation_id)}
