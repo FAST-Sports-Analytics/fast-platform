@@ -784,7 +784,7 @@ def create_portal_session(user: User = Depends(get_current_user), db: Session = 
     try:
         session = stripe.billing_portal.Session.create(
             customer=item.external_customer_id,
-            return_url=f"{settings.public_app_url.rstrip('/')}/pricing",
+            return_url=f"{settings.public_app_url.rstrip('/')}/account",
         )
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Stripe billing portal could not be opened: {exc}") from exc
