@@ -457,11 +457,94 @@ def subscription_payload(db: Session, organisation_id: int, *, refresh_provider:
         "plan": effective_plan,
     }
 
+def _scheduled_plan_change_payload(db: Session, item: OrganisationSubscription) -> dict | None:
+    """Return FAST's pending plan change from the active Stripe schedule, if any.
+
+    FAST creates a schedule only for period-end downgrades. Releasing that
+    schedule cancels the pending downgrade while leaving the current paid
+    subscription untouched.
+    """
+    if (
+        not item
+        or item.billing_provider != "stripe"
+        or not item.external_subscription_id
+        or not _stripe_ready()
+    ):
+        return None
+
+    _configure_stripe()
+    current_sub = stripe.Subscription.retrieve(item.external_subscription_id, expand=["items.data.price"])
+    schedule_ref = _obj_get(current_sub, "schedule")
+    schedule_id = str(_obj_get(schedule_ref, "id", schedule_ref) or "").strip()
+    if not schedule_id:
+        return None
+
+    schedule = stripe.SubscriptionSchedule.retrieve(schedule_id)
+    status = str(_obj_get(schedule, "status", "") or "").lower()
+    if status not in {"active", "not_started"}:
+        return None
+
+    current_phase = _obj_get(schedule, "current_phase", {}) or {}
+    current_phase_end = _obj_get(current_phase, "end_date")
+    phases = list(_obj_get(schedule, "phases", []) or [])
+
+    for phase in phases:
+        phase_start = _obj_get(phase, "start_date")
+        if current_phase_end is not None and phase_start is not None and int(phase_start) < int(current_phase_end):
+            continue
+
+        metadata = dict(_obj_get(phase, "metadata", {}) or {})
+        target_plan_id = str(metadata.get("fast_plan_id") or "").strip()
+        if not target_plan_id.isdigit():
+            continue
+
+        target_plan = db.get(SubscriptionPlan, int(target_plan_id))
+        if not target_plan:
+            continue
+
+        # The current live plan is authoritative. Ignore a schedule phase that
+        # merely repeats the current plan rather than changing it.
+        current_plan = _plan_from_live_stripe_price(db, current_sub) or item.plan
+        if current_plan and int(current_plan.id) == int(target_plan.id):
+            continue
+
+        interval = str(metadata.get("fast_billing_interval") or item.billing_interval or "monthly").lower()
+        if interval not in {"monthly", "annual"}:
+            interval = "monthly"
+        effective_at = _stripe_datetime(phase_start) or _stripe_datetime(current_phase_end)
+        return {
+            "type": "downgrade",
+            "plan": plan_payload(target_plan),
+            "billing_interval": interval,
+            "effective_at": effective_at.isoformat() if effective_at else None,
+        }
+
+    return None
+
+
 @router.get("/current")
 def current_subscription(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
     if user.organisation_id is None:
         return {"subscription": None}
-    return {"subscription": subscription_payload(db, int(user.organisation_id))}
+
+    organisation_id = int(user.organisation_id)
+    payload = subscription_payload(db, organisation_id, refresh_provider=True)
+    item = db.scalar(
+        select(OrganisationSubscription).where(
+            OrganisationSubscription.organisation_id == organisation_id
+        )
+    )
+    scheduled_change = None
+    if item:
+        try:
+            scheduled_change = _scheduled_plan_change_payload(db, item)
+        except Exception:
+            # Billing account access should remain available if Stripe cannot
+            # temporarily return schedule details. The normal subscription state
+            # is still useful and can be retried on refresh.
+            scheduled_change = None
+    payload["scheduled_plan_change"] = scheduled_change
+    return {"subscription": payload}
 
 
 @router.get("/public-plans")
@@ -932,6 +1015,66 @@ def change_subscription_plan(payload: ChangePlanRequest, user: User = Depends(ge
         raise
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Stripe subscription could not be changed: {exc}") from exc
+
+
+@router.post("/change-plan/cancel-scheduled")
+def cancel_scheduled_plan_change(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
+    """Cancel a pending FAST period-end downgrade and keep the current plan.
+
+    Stripe's schedule ``release`` operation removes future scheduled phases but
+    leaves the underlying subscription active on its current price.
+    """
+    organisation_id = _require_org_admin(user)
+    item = db.scalar(
+        select(OrganisationSubscription).where(
+            OrganisationSubscription.organisation_id == organisation_id
+        )
+    )
+    if not item or item.billing_provider != "stripe" or not item.external_subscription_id:
+        raise HTTPException(status_code=409, detail="This organisation does not have an active Stripe subscription")
+    if not _stripe_ready():
+        raise HTTPException(status_code=503, detail="Online billing is not configured yet")
+
+    _configure_stripe()
+    try:
+        current_sub = stripe.Subscription.retrieve(item.external_subscription_id, expand=["items.data.price"])
+        pending = _scheduled_plan_change_payload(db, item)
+        if not pending:
+            raise HTTPException(status_code=409, detail="There is no scheduled FAST downgrade to cancel")
+
+        schedule_ref = _obj_get(current_sub, "schedule")
+        schedule_id = str(_obj_get(schedule_ref, "id", schedule_ref) or "").strip()
+        if not schedule_id:
+            raise HTTPException(status_code=409, detail="There is no active Stripe schedule to cancel")
+
+        # Do not use SubscriptionSchedule.cancel(): Stripe documents that cancel
+        # also cancels the underlying subscription. ``release`` stops the future
+        # phases while preserving the currently active subscription.
+        stripe.SubscriptionSchedule.release(schedule_id)
+
+        refreshed = stripe.Subscription.retrieve(item.external_subscription_id, expand=["items.data.price"])
+        _sync_stripe_subscription(db, refreshed, organisation_id_override=organisation_id)
+        db.add(
+            AuditLog(
+                admin_user_id=user.id,
+                action="subscription_downgrade_cancelled",
+                category="billing",
+                target_type="organisation",
+                target_id=organisation_id,
+                target_label=str(organisation_id),
+                details="Scheduled subscription downgrade cancelled; current plan retained.",
+            )
+        )
+        db.commit()
+        return {
+            "cancelled": True,
+            "message": "Scheduled downgrade cancelled. Your current FAST plan will continue.",
+            "subscription": subscription_payload(db, organisation_id),
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Stripe scheduled downgrade could not be cancelled: {exc}") from exc
 
 
 @router.post("/portal")
