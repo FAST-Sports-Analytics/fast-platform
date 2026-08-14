@@ -382,10 +382,27 @@ def subscription_payload(db: Session, organisation_id: int, *, refresh_provider:
                 )
             )
         except Exception:
-            # Keep Organisation Management available if Stripe is temporarily
-            # unreachable; the last successfully synchronised FAST state remains
-            # the fallback and the normal webhook path can repair it later.
-            pass
+            # A schedule-managed subscription can disappear from Stripe as soon
+            # as its final paid phase ends.  If FAST already knows cancellation
+            # was scheduled, use the customer's Stripe Test Clock during sandbox
+            # simulations (or wall clock in live mode) to materialise terminal
+            # expiry instead of leaving the last paid plan displayed forever.
+            provider_now = _stripe_test_clock_datetime({"customer": item.external_customer_id}) or datetime.now(timezone.utc)
+            period_end = item.current_period_ends_at
+            if period_end and period_end.tzinfo is None:
+                period_end = period_end.replace(tzinfo=timezone.utc)
+            if item.cancel_at_period_end and period_end and provider_now >= period_end:
+                item.status = "cancelled"
+                item.cancel_at_period_end = False
+                item.grace_ends_at = None
+                organisation = db.get(Organisation, organisation_id)
+                if organisation:
+                    _revoke_subscription_entitlements(db, organisation, ended_at=period_end)
+                item.updated_at = datetime.now(timezone.utc)
+                db.commit()
+            # Otherwise keep Organisation Management available if Stripe is
+            # temporarily unreachable; the last successful state remains the
+            # fallback and the normal webhook path can repair it later.
     if not item:
         return {
             "status": "unconfigured",
@@ -415,10 +432,11 @@ def subscription_payload(db: Session, organisation_id: int, *, refresh_provider:
     # Stripe quantity scales plan capacity. ``seat_override`` stores the paid
     # user capacity after each Stripe sync; derive the matching device capacity
     # from the plan's base bundle so all API/UI checks use the same allowance.
-    effective_plan = plan_payload(item.plan)
+    terminal_subscription = status in {"cancelled", "expired"} and not item.cancel_at_period_end
+    effective_plan = None if terminal_subscription else plan_payload(item.plan)
     seat_limit = None
     device_limit = None
-    if item.plan:
+    if item.plan and not terminal_subscription:
         base_seats = max(1, int(item.plan.included_seats or 1))
         base_devices = max(1, int(item.plan.max_devices or 1))
         seat_limit = max(1, int(item.seat_override or base_seats))
@@ -1709,6 +1727,38 @@ def _schedule_cancels_at_end(subscription) -> bool:
     )
 
 
+
+def _revoke_subscription_entitlements(
+    db: Session, organisation: Organisation, *, ended_at: datetime | None = None
+) -> None:
+    """Revoke licence-backed FAST access after a commercial subscription ends.
+
+    The subscription row is retained for billing history/resubscription, but all
+    organisation-owned desktop licences are made non-current so Launcher cannot
+    continue using paid applications after the final paid period.
+    """
+    effective_end = ended_at or datetime.now(timezone.utc)
+    organisation.expires_at = effective_end
+    organisation.max_seats = 0
+
+    club_ids = list(
+        db.scalars(
+            select(Club.id).where(Club.organisation_id == organisation.id)
+        ).all()
+    )
+    if club_ids:
+        licences = db.scalars(
+            select(Licence).where(
+                Licence.club_id.in_(club_ids),
+                Licence.owner_type == "club",
+            )
+        ).all()
+        for licence in licences:
+            licence.status = "expired"
+            licence.renewable = False
+            licence.expires_at = effective_end
+    db.flush()
+
 def _ensure_subscription_entitlements(
     db: Session, organisation: Organisation, plan: SubscriptionPlan, *, quantity: int = 1, seat_limit: int | None = None
 ) -> None:
@@ -1898,11 +1948,16 @@ def _sync_stripe_subscription(
         # seat evaluator otherwise falls back to the plan's single-unit limit.
         item.seat_override = max(1, int(effective_plan.included_seats or 1)) * quantity
         organisation.max_seats = item.seat_override
-        # Keep the organisation/admin UI and the licence-backed desktop access
-        # in lock-step with Stripe on every subscription sync.  This also makes
-        # a resent webhook repair organisations created by older deployments.
         organisation.expires_at = item.current_period_ends_at
-        _ensure_subscription_entitlements(db, organisation, effective_plan, quantity=quantity)
+        # Only commercially live states may provision an active desktop licence.
+        # Stripe can still include the old price/plan on a terminal cancelled
+        # object; re-provisioning it here would incorrectly restore paid access.
+        if item.status in {"active", "trial", "grace_period", "past_due"}:
+            _ensure_subscription_entitlements(db, organisation, effective_plan, quantity=quantity)
+        else:
+            _revoke_subscription_entitlements(
+                db, organisation, ended_at=item.current_period_ends_at or datetime.now(timezone.utc)
+            )
         # Apply any access reductions chosen when a period-end downgrade was
         # scheduled. Paid access remains unchanged until Stripe switches plans.
         if item.pending_downgrade_plan_id == effective_plan.id and previous_plan_id != effective_plan.id:
@@ -2002,15 +2057,17 @@ async def stripe_webhook(request: Request) -> dict:
                     if event_type == "customer.subscription.deleted":
                         # A deleted Stripe subscription is terminal: the paid period has
                         # already ended (or the subscription was cancelled immediately).
-                        # Do not retain the previous current_period_end here, otherwise
-                        # the access evaluator can incorrectly interpret a final deletion
-                        # as "cancelled pending" and keep FAST applications enabled.
+                        # Preserve the last known paid-through timestamp for account
+                        # history, but revoke every licence-backed entitlement now.
+                        terminal_end = matched_item.current_period_ends_at or subscription_occurred_at or event_created_at or datetime.now(timezone.utc)
                         matched_item.status = "cancelled"
                         matched_item.cancel_at_period_end = False
-                        matched_item.current_period_ends_at = None
                         matched_item.grace_ends_at = None
                         matched_item.updated_at = datetime.now(timezone.utc)
-                        details = "Stripe subscription deleted; FAST access is cancelled immediately."
+                        terminal_org = db.get(Organisation, matched_item.organisation_id)
+                        if terminal_org:
+                            _revoke_subscription_entitlements(db, terminal_org, ended_at=terminal_end)
+                        details = "Stripe subscription deleted; FAST paid access and licence entitlements revoked."
                     else:
                         details = (
                             f"Subscription state synchronised to {matched_item.status}; "

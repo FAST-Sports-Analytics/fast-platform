@@ -462,18 +462,20 @@ export default function AccountPage() {
         <p>Only your organisation administrator can change the FAST subscription or billing details.</p>
       </section> : <>
         <section className="account-panel">
-          <div className="account-panel-heading"><div><p className="eyebrow">Current subscription</p><h2>FAST {subscription?.plan?.name || "Plan not configured"}</h2></div><strong className="account-price">{currentPrice}</strong></div>
-          <div className="account-metrics">
-            <article><small>Users</small><strong>{subscription?.seats_used ?? 0} / {subscription?.seat_limit ?? "—"}</strong></article>
-            <article><small>Devices</small><strong>{subscription?.device_limit ?? "—"}</strong></article>
-            <article><small>{subscription?.period_label || "Renewal"}</small><strong>{dateLabel(subscription?.period_value)}</strong></article>
-            <article><small>Billing</small><strong>{subscription?.billing_interval ? subscription.billing_interval[0].toUpperCase() + subscription.billing_interval.slice(1) : "—"}</strong></article>
-          </div>
-          {subscription?.plan && <div className="account-entitlements"><span>{subscription.plan.products.map(value => `FAST ${value[0].toUpperCase()}${value.slice(1)}`).join(" + ")}</span><span>{subscription.plan.cloud_storage_gb} GB cloud storage</span></div>}
+          <div className="account-panel-heading"><div><p className="eyebrow">{subscription?.plan ? "Current subscription" : "Subscription"}</p><h2>{subscription?.plan ? `FAST ${subscription.plan.name}` : "No active FAST subscription"}</h2></div>{subscription?.plan && <strong className="account-price">{currentPrice}</strong>}</div>
+          {subscription?.plan ? <>
+            <div className="account-metrics">
+              <article><small>Users</small><strong>{subscription?.seats_used ?? 0} / {subscription?.seat_limit ?? "—"}</strong></article>
+              <article><small>Devices</small><strong>{subscription?.device_limit ?? "—"}</strong></article>
+              <article><small>{subscription?.period_label || "Renewal"}</small><strong>{dateLabel(subscription?.period_value)}</strong></article>
+              <article><small>Billing</small><strong>{subscription?.billing_interval ? subscription.billing_interval[0].toUpperCase() + subscription.billing_interval.slice(1) : "—"}</strong></article>
+            </div>
+            <div className="account-entitlements"><span>{subscription.plan.products.map(value => `FAST ${value[0].toUpperCase()}${value.slice(1)}`).join(" + ")}</span><span>{subscription.plan.cloud_storage_gb} GB cloud storage</span></div>
+          </> : <p>Your paid FAST access has ended. Choose a plan below to restore licensed applications and organisation entitlements.</p>}
           <div className="account-actions">
             <button className="button button-quiet" type="button" disabled={working || !subscription?.can_manage_billing} onClick={manageBilling}>Manage payment & invoices</button>
-            {!subscription?.cancel_at_period_end && <button className="button button-danger" type="button" disabled={working || !subscription?.can_manage_billing || Boolean(subscription?.scheduled_plan_change)} onClick={() => setCancelSubscriptionOpen(true)}>Cancel subscription</button>}
-            {subscription?.cancel_at_period_end && <button className="button button-primary" type="button" disabled={working} onClick={undoCancellation}>{working ? "Processing…" : "Keep subscription"}</button>}
+            {subscription?.plan && !subscription?.cancel_at_period_end && <button className="button button-danger" type="button" disabled={working || !subscription?.can_manage_billing || Boolean(subscription?.scheduled_plan_change)} onClick={() => setCancelSubscriptionOpen(true)}>Cancel subscription</button>}
+            {subscription?.plan && subscription?.cancel_at_period_end && <button className="button button-primary" type="button" disabled={working} onClick={undoCancellation}>{working ? "Processing…" : "Keep subscription"}</button>}
           </div>
         </section>
 
