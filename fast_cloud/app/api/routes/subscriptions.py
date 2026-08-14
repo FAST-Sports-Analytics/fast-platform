@@ -998,10 +998,18 @@ def _ensure_subscription_entitlements(
         db.add(club)
         db.flush()
 
-    licence = db.scalar(
-        select(Licence).where(Licence.club_id == club.id, Licence.owner_type == "club").order_by(Licence.id.desc())
-    )
-    if not licence:
+    # An organisation can have historical/multiple club records.  Older FAST
+    # builds provisioned the desktop licence independently of subscriptions, so
+    # updating only the first club/latest licence can leave the licence actually
+    # used by Launcher on the old tier.  Synchronise every current club-owned
+    # licence for this organisation, while still creating one when none exists.
+    organisation_licences = db.scalars(
+        select(Licence)
+        .join(Club, Club.id == Licence.club_id)
+        .where(Club.organisation_id == organisation.id, Licence.owner_type == "club")
+        .order_by(Licence.id.desc())
+    ).all()
+    if not organisation_licences:
         code = generate_licence_code(plan.name)
         licence = Licence(
             code_hash=hash_licence_code(code),
@@ -1013,15 +1021,17 @@ def _ensure_subscription_entitlements(
             activated_at=datetime.now(timezone.utc),
         )
         db.add(licence)
+        organisation_licences = [licence]
 
-    licence.tier = plan.name
-    licence.products_json = json.dumps(products)
-    licence.sports_json = json.dumps(selected_sports)
-    licence.features_json = plan.features_json or "{}"
-    licence.max_devices = licensed_devices
-    licence.max_users = licensed_users
-    licence.status = "active"
-    licence.renewable = True
+    for licence in organisation_licences:
+        licence.tier = plan.name
+        licence.products_json = json.dumps(products)
+        licence.sports_json = json.dumps(selected_sports)
+        licence.features_json = plan.features_json or "{}"
+        licence.max_devices = licensed_devices
+        licence.max_users = licensed_users
+        licence.status = "active"
+        licence.renewable = True
 
     # Keep organisation users inside the subscription envelope. Their explicit
     # assignment can narrow access later, but a newly provisioned administrator
