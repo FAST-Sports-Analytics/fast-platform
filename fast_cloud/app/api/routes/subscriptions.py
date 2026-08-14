@@ -372,6 +372,34 @@ def subscription_payload(db: Session, organisation_id: int, *, refresh_provider:
                 remote,
                 organisation_id_override=organisation_id,
             )
+
+            # Stripe Test Clocks advance Stripe's provider time without changing
+            # Railway's wall clock. A schedule-managed cancellation can therefore
+            # remain retrievable as an apparently active subscription while its
+            # paid-through boundary is already in the past according to Stripe.
+            # Reconcile that boundary explicitly even when retrieve() succeeds.
+            provider_now = _stripe_test_clock_datetime(remote) or datetime.now(timezone.utc)
+            period_end = item.current_period_ends_at
+            if period_end and period_end.tzinfo is None:
+                period_end = period_end.replace(tzinfo=timezone.utc)
+            cancellation_due = bool(
+                period_end
+                and provider_now >= period_end
+                and (
+                    item.cancel_at_period_end
+                    or _subscription_cancellation_scheduled(remote)
+                    or _schedule_cancels_at_end(remote)
+                )
+            )
+            if cancellation_due:
+                item.status = "cancelled"
+                item.cancel_at_period_end = False
+                item.grace_ends_at = None
+                organisation = db.get(Organisation, organisation_id)
+                if organisation:
+                    _revoke_subscription_entitlements(db, organisation, ended_at=period_end)
+                item.updated_at = datetime.now(timezone.utc)
+
             # get_db() does not auto-commit on request completion. Persist the
             # provider reconciliation performed by this explicit refresh so the
             # next Launcher request sees the same cancellation state.
