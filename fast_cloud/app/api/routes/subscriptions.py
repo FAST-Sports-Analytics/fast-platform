@@ -1293,6 +1293,39 @@ def _stripe_datetime(value) -> datetime | None:
         return None
 
 
+def _stripe_test_clock_datetime(value) -> datetime | None:
+    """Return Stripe Test Clock frozen time when this object belongs to one.
+
+    Stripe webhook ``event.created`` uses real wall-clock time even when the
+    customer/subscription is being advanced by a sandbox Test Clock.  Billing
+    lifecycle deadlines must therefore use the clock's ``frozen_time`` during
+    simulations, while live Stripe objects naturally fall back to event time.
+    """
+    if not _stripe_ready():
+        return None
+
+    test_clock_id = str(_obj_get(value, "test_clock", "") or "").strip()
+    customer_id = _stripe_customer_id(value)
+
+    if not test_clock_id and customer_id:
+        try:
+            _configure_stripe()
+            customer = stripe.Customer.retrieve(customer_id)
+            test_clock_id = str(_obj_get(customer, "test_clock", "") or "").strip()
+        except Exception:
+            test_clock_id = ""
+
+    if not test_clock_id:
+        return None
+
+    try:
+        _configure_stripe()
+        test_clock = stripe.test_helpers.TestClock.retrieve(test_clock_id)
+        return _stripe_datetime(_obj_get(test_clock, "frozen_time"))
+    except Exception:
+        return None
+
+
 def _map_stripe_status(value: str | None) -> str:
     status = str(value or "").lower()
     return {
@@ -1703,7 +1736,11 @@ async def stripe_webhook(request: Request) -> dict:
                     details = "Stripe subscription is not mapped to a FAST organisation."
             elif event_type in {"invoice.payment_failed", "invoice.payment_action_required"}:
                 referenced_subscription_id = _invoice_subscription_id(data)
-                matched_item = _apply_payment_failure(db, data, occurred_at=event_created_at)
+                # Test Clock webhook events retain their real delivery timestamp.
+                # Use the simulated clock's frozen time for grace deadlines when
+                # available; live customers have no test_clock and use event time.
+                failure_occurred_at = _stripe_test_clock_datetime(data) or event_created_at
+                matched_item = _apply_payment_failure(db, data, occurred_at=failure_occurred_at)
                 if matched_item:
                     details = (
                         f"Payment failure applied; FAST access remains available during grace until "
