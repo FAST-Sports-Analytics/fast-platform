@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     jwt_secret: str = "development-only-change-me"
     access_token_minutes: int = 30
     refresh_token_days: int = 30
+    admin_portal_session_days: int = 7
     admin_email: str = "admin@fastsportsanalytics.com"
     admin_password: str = "ChangeMe123!"
     public_app_url: str = "https://www.fastsportsanalytics.com"

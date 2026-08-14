@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 
 from app.core.seats import ALLOCATED_USER_STATUSES, allocated_user_count, effective_user_seat_limit, organisation_device_capacity
 from app.core.security import (
-    create_access_token,
+    create_admin_portal_token,
     decode_token,
     generate_licence_code,
     hash_licence_code,
@@ -31,12 +31,14 @@ from app.core.security import (
 )
 from app.db.session import engine, get_db
 from app.models import AuditLog, BillingWebhookEvent, Club, ClubMember, CrashReport, DeviceActivation, DeviceAuditLog, Licence, LicenceTemplate, Organisation, OrganisationSubscription, Product, Release, RemoteCommand, Sport, User
+from app.core.config import get_settings
 from app.releases import MAX_PACKAGE_BYTES as MAX_RELEASE_PACKAGE_BYTES, PACKAGES_DIR as RELEASE_PACKAGES_DIR, validate_release_package
 
 router = APIRouter(prefix="/admin", tags=["Admin Portal"])
 templates = Jinja2Templates(directory="app/templates")
 templates.env.globals["json"] = json
 COOKIE_NAME = "fast_cloud_admin"
+settings = get_settings()
 
 SERVER_STARTED_AT = datetime.now(timezone.utc)
 
@@ -170,7 +172,7 @@ def current_admin(request: Request, db: Session) -> User | None:
     if not token:
         return None
     try:
-        user_id = decode_token(token)
+        user_id = decode_token(token, expected_type="admin_portal")
     except (InvalidTokenError, ValueError, KeyError):
         return None
     user = db.get(User, user_id)
@@ -240,13 +242,14 @@ def login_submit(
             status_code=401,
         )
     response = RedirectResponse("/admin/dashboard", status_code=303)
+    session_seconds = max(1, settings.admin_portal_session_days) * 24 * 60 * 60
     response.set_cookie(
         COOKIE_NAME,
-        create_access_token(user.id),
+        create_admin_portal_token(user.id),
         httponly=True,
         samesite="lax",
-        secure=False,
-        max_age=1800,
+        secure=settings.environment.lower() == "production",
+        max_age=session_seconds,
     )
     return response
 

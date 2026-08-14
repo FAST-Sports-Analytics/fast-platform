@@ -39,6 +39,15 @@ def create_refresh_token(user_id: int) -> str:
     return create_token(str(user_id), "refresh", timedelta(days=settings.refresh_token_days))
 
 
+def create_admin_portal_token(user_id: int) -> str:
+    """Create a persistent browser-session token for the FAST Cloud admin portal."""
+    return create_token(
+        str(user_id),
+        "admin_portal",
+        timedelta(days=max(1, settings.admin_portal_session_days)),
+    )
+
+
 def decode_token(token: str, expected_type: str = "access") -> int:
     payload = jwt.decode(token, settings.jwt_secret, algorithms=["HS256"])
     if payload.get("type") != expected_type:
