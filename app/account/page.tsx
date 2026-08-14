@@ -293,29 +293,14 @@ export default function AccountPage() {
     if (!planPreview || !capacityOverview) return;
     const usersToRelease = Math.max(0, (planPreview.current_seats_used || 0) - (planPreview.target_seat_limit || 0));
     const devicesToRelease = Math.max(0, (planPreview.current_devices_used || 0) - (planPreview.target_device_limit || 0));
-    if (selectedUserIds.length < usersToRelease || selectedDeviceIds.length < devicesToRelease) return;
-
+    if (selectedUserIds.length !== usersToRelease || selectedDeviceIds.length !== devicesToRelease) return;
     setWorking(true);
     setError("");
     try {
-      for (const userId of selectedUserIds) {
-        const target = (capacityOverview.users || []).find(item => item.id === userId);
-        if (!target) continue;
-        await api(`/api/v1/organisation-management/users/${userId}`, {
-          method: "PATCH",
-          body: JSON.stringify({
-            full_name: target.full_name || target.email,
-            role: target.role || "analyst",
-            status: "suspended",
-            products: target.products || [],
-            sports: target.sports || [],
-          }),
-        });
-      }
-      for (const deviceId of selectedDeviceIds) {
-        await api(`/api/v1/organisation-management/devices/${deviceId}/deactivate`, { method: "POST" });
-      }
-
+      await api("/api/v1/subscriptions/change-plan/stage-access", {
+        method: "POST",
+        body: JSON.stringify({ plan_id: planPreview.target_plan.id, user_ids: selectedUserIds, device_ids: selectedDeviceIds }),
+      });
       const preview = await api("/api/v1/subscriptions/change-plan/preview", {
         method: "POST",
         body: JSON.stringify({ plan_id: planPreview.target_plan.id, billing_interval: planPreview.target_billing_interval }),
@@ -325,10 +310,9 @@ export default function AccountPage() {
       setCapacityOverview(null);
       setSelectedUserIds([]);
       setSelectedDeviceIds([]);
-      await load();
-      setMessage("Licence usage updated. Review the downgrade details, then confirm when ready.");
+      setMessage(`Access changes selected. They will not take effect until the FAST ${planPreview.target_plan.name} downgrade starts.`);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "FAST Cloud could not update your licence usage.");
+      setError(err instanceof Error ? err.message : "FAST Cloud could not schedule your licence changes.");
     } finally {
       setWorking(false);
     }
@@ -576,11 +560,11 @@ export default function AccountPage() {
         <button className="account-modal-close" type="button" disabled={working} onClick={() => setCapacityManagerOpen(false)} aria-label="Close">×</button>
         <p className="eyebrow">MANAGE DOWNGRADE LIMITS</p>
         <h2 id="capacity-manager-title">Choose access to remove</h2>
-        <p className="account-confirm-copy">FAST {planPreview.target_plan.name} includes {planPreview.target_seat_limit} licensed users and {planPreview.target_device_limit} active devices. Choose which access should be suspended before the downgrade is scheduled. Accounts and local data are not deleted.</p>
+        <p className="account-confirm-copy">FAST {planPreview.target_plan.name} includes {planPreview.target_seat_limit} licensed users and {planPreview.target_device_limit} active devices. Choose which access should end when the downgrade takes effect. Everyone keeps their current paid access until then. Accounts and local data are not deleted.</p>
 
         {(planPreview.current_seats_used || 0) > (planPreview.target_seat_limit || 0) && <div className="account-capacity-section">
           <h3>Licensed users</h3>
-          <p>Select exactly {(planPreview.current_seats_used || 0) - (planPreview.target_seat_limit || 0)} user(s) to suspend. Your own administrator access cannot be selected.</p>
+          <p>Select exactly {(planPreview.current_seats_used || 0) - (planPreview.target_seat_limit || 0)} user(s) whose licensed access will be suspended on the downgrade date. Your own administrator access cannot be selected.</p>
           <div className="account-capacity-list">
             {(capacityOverview.users || []).filter(item => ["active", "invited"].includes(String(item.status || "").toLowerCase())).map(item => {
               const isSelf = item.email.toLowerCase() === String(user.email || "").toLowerCase();
@@ -597,7 +581,7 @@ export default function AccountPage() {
 
         {(planPreview.current_devices_used || 0) > (planPreview.target_device_limit || 0) && <div className="account-capacity-section">
           <h3>Active devices</h3>
-          <p>Select exactly {(planPreview.current_devices_used || 0) - (planPreview.target_device_limit || 0)} device(s) to deactivate.</p>
+          <p>Select exactly {(planPreview.current_devices_used || 0) - (planPreview.target_device_limit || 0)} device(s) to deactivate on the downgrade date.</p>
           <div className="account-capacity-list">
             {(capacityOverview.devices || []).filter(item => item.active).map(item => {
               const checked = selectedDeviceIds.includes(item.id);
@@ -613,7 +597,7 @@ export default function AccountPage() {
 
         <div className="account-modal-actions">
           <button className="button button-quiet" type="button" disabled={working} onClick={() => setCapacityManagerOpen(false)}>Back</button>
-          <button className="button button-primary" type="button" disabled={working || selectedUserIds.length < Math.max(0, (planPreview.current_seats_used || 0) - (planPreview.target_seat_limit || 0)) || selectedDeviceIds.length < Math.max(0, (planPreview.current_devices_used || 0) - (planPreview.target_device_limit || 0))} onClick={applyCapacityChanges}>{working ? "Applying…" : "Apply licence changes"}</button>
+          <button className="button button-primary" type="button" disabled={working || selectedUserIds.length < Math.max(0, (planPreview.current_seats_used || 0) - (planPreview.target_seat_limit || 0)) || selectedDeviceIds.length < Math.max(0, (planPreview.current_devices_used || 0) - (planPreview.target_device_limit || 0))} onClick={applyCapacityChanges}>{working ? "Saving…" : "Schedule access changes"}</button>
         </div>
       </section>
     </div>}

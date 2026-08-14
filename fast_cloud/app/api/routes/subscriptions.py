@@ -489,26 +489,40 @@ def _downgrade_capacity_payload(
     db: Session,
     organisation_id: int,
     target: SubscriptionPlan,
+    item: OrganisationSubscription | None = None,
 ) -> dict:
     """Describe whether current organisation usage fits inside the target plan."""
     from app.core.seats import allocated_user_count
 
     seats_used = int(allocated_user_count(db, organisation_id))
     devices_used = int(_organisation_active_device_count(db, organisation_id))
+    pending_user_ids: list[int] = []
+    pending_device_ids: list[int] = []
+    if item and item.pending_downgrade_plan_id == target.id:
+        try:
+            pending_user_ids = [int(value) for value in json.loads(item.pending_downgrade_user_ids_json or "[]")]
+        except (TypeError, ValueError, json.JSONDecodeError):
+            pending_user_ids = []
+        try:
+            pending_device_ids = [int(value) for value in json.loads(item.pending_downgrade_device_ids_json or "[]")]
+        except (TypeError, ValueError, json.JSONDecodeError):
+            pending_device_ids = []
+    effective_seats_used = max(0, seats_used - len(set(pending_user_ids)))
+    effective_devices_used = max(0, devices_used - len(set(pending_device_ids)))
     seat_limit = max(1, int(target.included_seats or 1))
     device_limit = max(1, int(target.max_devices or 1))
 
     blockers: list[str] = []
-    if seats_used > seat_limit:
-        remove_count = seats_used - seat_limit
+    if effective_seats_used > seat_limit:
+        remove_count = effective_seats_used - seat_limit
         blockers.append(
             f"FAST {target.name} includes {seat_limit} licensed user"
             f"{'s' if seat_limit != 1 else ''}, but your organisation currently uses {seats_used}. "
             f"Remove or deactivate {remove_count} licensed user"
             f"{'s' if remove_count != 1 else ''} before scheduling this downgrade."
         )
-    if devices_used > device_limit:
-        remove_count = devices_used - device_limit
+    if effective_devices_used > device_limit:
+        remove_count = effective_devices_used - device_limit
         blockers.append(
             f"FAST {target.name} allows {device_limit} active device"
             f"{'s' if device_limit != 1 else ''}, but your organisation currently uses {devices_used}. "
@@ -523,6 +537,8 @@ def _downgrade_capacity_payload(
         "target_seat_limit": seat_limit,
         "current_devices_used": devices_used,
         "target_device_limit": device_limit,
+        "pending_user_ids": pending_user_ids,
+        "pending_device_ids": pending_device_ids,
     }
 
 
@@ -942,7 +958,7 @@ def preview_subscription_plan_change(payload: ChangePlanRequest, user: User = De
             "currency": settings.billing_currency.lower(),
         }
         if is_downgrade:
-            capacity = _downgrade_capacity_payload(db, organisation_id, target)
+            capacity = _downgrade_capacity_payload(db, organisation_id, target, item)
             return {
                 **common,
                 **capacity,
@@ -980,6 +996,45 @@ def preview_subscription_plan_change(payload: ChangePlanRequest, user: User = De
         raise
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Stripe could not preview this plan change: {exc}") from exc
+
+
+class DowngradeAccessSelectionRequest(BaseModel):
+    plan_id: int
+    user_ids: list[int] = Field(default_factory=list)
+    device_ids: list[int] = Field(default_factory=list)
+
+
+@router.post("/change-plan/stage-access")
+def stage_downgrade_access(payload: DowngradeAccessSelectionRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
+    organisation_id = _require_org_admin(user)
+    item = db.scalar(select(OrganisationSubscription).where(OrganisationSubscription.organisation_id == organisation_id))
+    target = db.get(SubscriptionPlan, payload.plan_id)
+    if not item or not target or not target.active:
+        raise HTTPException(status_code=404, detail="FAST subscription or target plan was not found")
+    raw_capacity = _downgrade_capacity_payload(db, organisation_id, target, None)
+    users_required = max(0, int(raw_capacity["current_seats_used"]) - int(raw_capacity["target_seat_limit"]))
+    devices_required = max(0, int(raw_capacity["current_devices_used"]) - int(raw_capacity["target_device_limit"]))
+    user_ids = list(dict.fromkeys(int(value) for value in payload.user_ids))
+    device_ids = list(dict.fromkeys(int(value) for value in payload.device_ids))
+    if len(user_ids) != users_required or len(device_ids) != devices_required:
+        raise HTTPException(status_code=409, detail="Select exactly the number of users and devices required for the destination plan")
+    if user.id in user_ids:
+        raise HTTPException(status_code=409, detail="Your own administrator account cannot be scheduled for suspension")
+    if user_ids:
+        valid_users = set(db.scalars(select(User.id).where(User.organisation_id == organisation_id, User.id.in_(user_ids), User.status.in_(["active", "invited"]))).all())
+        if valid_users != set(user_ids):
+            raise HTTPException(status_code=409, detail="One or more selected users are not active members of this organisation")
+    if device_ids:
+        valid_devices = set(db.scalars(select(DeviceActivation.id).join(Licence, Licence.id == DeviceActivation.licence_id).outerjoin(Club, Club.id == Licence.club_id).outerjoin(User, User.id == Licence.user_id).where(DeviceActivation.id.in_(device_ids), DeviceActivation.active.is_(True), ((Club.organisation_id == organisation_id) | (User.organisation_id == organisation_id)))).all())
+        if valid_devices != set(device_ids):
+            raise HTTPException(status_code=409, detail="One or more selected devices are not active devices for this organisation")
+    item.pending_downgrade_plan_id = target.id
+    item.pending_downgrade_user_ids_json = json.dumps(user_ids)
+    item.pending_downgrade_device_ids_json = json.dumps(device_ids)
+    item.pending_downgrade_effective_at = item.current_period_ends_at
+    db.add(AuditLog(admin_user_id=user.id, action="subscription_downgrade_access_staged", category="billing", target_type="organisation", target_id=organisation_id, target_label=str(organisation_id), details=f"Scheduled {len(user_ids)} user suspension(s) and {len(device_ids)} device deactivation(s) for FAST {target.name} downgrade."))
+    db.commit()
+    return {"staged": True, "effective_at": item.pending_downgrade_effective_at.isoformat() if item.pending_downgrade_effective_at else None, "capacity": _downgrade_capacity_payload(db, organisation_id, target, item)}
 
 
 @router.post("/change-plan")
@@ -1025,7 +1080,7 @@ def change_subscription_plan(payload: ChangePlanRequest, user: User = Depends(ge
         metadata.update({"fast_organisation_id": str(organisation_id), "fast_plan_id": str(target.id), "fast_billing_interval": interval})
 
         if is_downgrade:
-            capacity = _downgrade_capacity_payload(db, organisation_id, target)
+            capacity = _downgrade_capacity_payload(db, organisation_id, target, item)
             if capacity["downgrade_blocked"]:
                 raise HTTPException(
                     status_code=409,
@@ -1065,6 +1120,7 @@ def change_subscription_plan(payload: ChangePlanRequest, user: User = Depends(ge
                 raise HTTPException(status_code=502, detail="Stripe subscription schedule has no current phase start date")
 
             phase_end_ts = int(current_phase_end or period_end.timestamp())
+            item.pending_downgrade_effective_at = period_end
             current_price = _obj_get(sub_items[0], "price", {}) or {}
             current_price_id = str(_obj_get(current_price, "id", "") or "").strip()
             target_price_id = str(_obj_get(target_price, "id", "") or "").strip()
@@ -1191,6 +1247,10 @@ def cancel_scheduled_plan_change(user: User = Depends(get_current_user), db: Ses
 
         refreshed = stripe.Subscription.retrieve(item.external_subscription_id, expand=["items.data.price"])
         _sync_stripe_subscription(db, refreshed, organisation_id_override=organisation_id)
+        item.pending_downgrade_plan_id = None
+        item.pending_downgrade_user_ids_json = "[]"
+        item.pending_downgrade_device_ids_json = "[]"
+        item.pending_downgrade_effective_at = None
         db.add(
             AuditLog(
                 admin_user_id=user.id,
@@ -1680,6 +1740,7 @@ def _sync_stripe_subscription(
     if not item:
         item = OrganisationSubscription(organisation_id=organisation.id)
         db.add(item)
+    previous_plan_id = item.plan_id
     # The live Stripe price is authoritative for tier changes. Dashboard
     # changes do not rewrite checkout metadata, so relying on fast_plan_id would
     # leave a downgraded Starter subscription provisioned as Professional.
@@ -1736,6 +1797,27 @@ def _sync_stripe_subscription(
         # a resent webhook repair organisations created by older deployments.
         organisation.expires_at = item.current_period_ends_at
         _ensure_subscription_entitlements(db, organisation, effective_plan, quantity=quantity)
+        # Apply any access reductions chosen when a period-end downgrade was
+        # scheduled. Paid access remains unchanged until Stripe switches plans.
+        if item.pending_downgrade_plan_id == effective_plan.id and previous_plan_id != effective_plan.id:
+            try:
+                pending_user_ids = [int(value) for value in json.loads(item.pending_downgrade_user_ids_json or "[]")]
+            except (TypeError, ValueError, json.JSONDecodeError):
+                pending_user_ids = []
+            try:
+                pending_device_ids = [int(value) for value in json.loads(item.pending_downgrade_device_ids_json or "[]")]
+            except (TypeError, ValueError, json.JSONDecodeError):
+                pending_device_ids = []
+            if pending_user_ids:
+                for pending_user in db.scalars(select(User).where(User.organisation_id == organisation.id, User.id.in_(pending_user_ids))).all():
+                    pending_user.status = "suspended"
+            if pending_device_ids:
+                for pending_device in db.scalars(select(DeviceActivation).where(DeviceActivation.id.in_(pending_device_ids))).all():
+                    pending_device.active = False
+            item.pending_downgrade_plan_id = None
+            item.pending_downgrade_user_ids_json = "[]"
+            item.pending_downgrade_device_ids_json = "[]"
+            item.pending_downgrade_effective_at = None
         for club in organisation.clubs:
             for licence in club.licences:
                 if licence.status == "active":

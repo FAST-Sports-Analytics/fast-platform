@@ -118,6 +118,10 @@ class OrganisationSubscription(Base):
     external_customer_id: Mapped[str | None] = mapped_column(String(160), nullable=True, index=True)
     external_subscription_id: Mapped[str | None] = mapped_column(String(160), nullable=True, index=True)
     seat_override: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    pending_downgrade_plan_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    pending_downgrade_user_ids_json: Mapped[str] = mapped_column(Text, default="[]")
+    pending_downgrade_device_ids_json: Mapped[str] = mapped_column(Text, default="[]")
+    pending_downgrade_effective_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 

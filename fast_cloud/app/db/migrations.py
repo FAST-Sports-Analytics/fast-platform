@@ -72,6 +72,34 @@ def migrate_schema(engine: Engine) -> None:
             connection.execute(text("UPDATE organisations SET secondary_colour='#151A1D' WHERE secondary_colour IS NULL OR secondary_colour=''"))
             connection.execute(text("UPDATE organisations SET accent_colour='#19D978' WHERE accent_colour IS NULL OR accent_colour=''"))
 
+
+    if "organisation_subscriptions" in table_names:
+        subscription_columns = {column["name"] for column in inspector.get_columns("organisation_subscriptions")}
+        subscription_additions = {
+            "pending_downgrade_plan_id": "INTEGER",
+            "pending_downgrade_user_ids_json": "TEXT NOT NULL DEFAULT '[]'",
+            "pending_downgrade_device_ids_json": "TEXT NOT NULL DEFAULT '[]'",
+            "pending_downgrade_effective_at": "DATETIME",
+        }
+        with engine.begin() as connection:
+            for name, definition in subscription_additions.items():
+                if name not in subscription_columns:
+                    connection.execute(text(f"ALTER TABLE organisation_subscriptions ADD COLUMN {name} {definition}"))
+
+
+    if "organisation_subscriptions" in table_names:
+        subscription_columns = {column["name"] for column in inspector.get_columns("organisation_subscriptions")}
+        subscription_additions = {
+            "pending_downgrade_plan_id": "INTEGER",
+            "pending_downgrade_user_ids_json": "TEXT NOT NULL DEFAULT '[]'",
+            "pending_downgrade_device_ids_json": "TEXT NOT NULL DEFAULT '[]'",
+            "pending_downgrade_effective_at": "DATETIME",
+        }
+        with engine.begin() as connection:
+            for name, definition in subscription_additions.items():
+                if name not in subscription_columns:
+                    connection.execute(text(f"ALTER TABLE organisation_subscriptions ADD COLUMN {name} {definition}"))
+
     if "clubs" in table_names:
         club_columns = {column["name"] for column in inspector.get_columns("clubs")}
         if "organisation_id" not in club_columns:
