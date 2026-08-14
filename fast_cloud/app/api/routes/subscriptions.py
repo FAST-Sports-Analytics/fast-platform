@@ -458,10 +458,11 @@ def subscription_payload(db: Session, organisation_id: int, *, refresh_provider:
     }
 
 def _scheduled_plan_change_payload(db: Session, item: OrganisationSubscription) -> dict | None:
-    """Return FAST's pending plan change from the active Stripe schedule, if any.
+    """Return FAST's pending period-end subscription change, if any.
 
-    FAST creates a schedule only for period-end downgrades. Releasing that
-    schedule cancels the pending downgrade while leaving the current paid
+    A Stripe schedule can represent either a tier downgrade or a billing-interval
+    change (for example Professional annual -> Professional monthly). Releasing
+    the schedule cancels the future change while leaving the current paid
     subscription untouched.
     """
     if (
@@ -502,18 +503,21 @@ def _scheduled_plan_change_payload(db: Session, item: OrganisationSubscription) 
         if not target_plan:
             continue
 
-        # The current live plan is authoritative. Ignore a schedule phase that
-        # merely repeats the current plan rather than changing it.
         current_plan = _plan_from_live_stripe_price(db, current_sub) or item.plan
-        if current_plan and int(current_plan.id) == int(target_plan.id):
-            continue
-
         interval = str(metadata.get("fast_billing_interval") or item.billing_interval or "monthly").lower()
         if interval not in {"monthly", "annual"}:
             interval = "monthly"
+
+        same_plan = bool(current_plan and int(current_plan.id) == int(target_plan.id))
+        current_interval = str(item.billing_interval or "monthly").lower()
+        if same_plan and interval == current_interval:
+            # A future phase that repeats both the current tier and interval is
+            # not a customer-visible subscription change.
+            continue
+
         effective_at = _stripe_datetime(phase_start) or _stripe_datetime(current_phase_end)
         return {
-            "type": "downgrade",
+            "type": "billing_interval" if same_plan else "downgrade",
             "plan": plan_payload(target_plan),
             "billing_interval": interval,
             "effective_at": effective_at.isoformat() if effective_at else None,
@@ -1062,7 +1066,7 @@ def change_subscription_plan(payload: ChangePlanRequest, user: User = Depends(ge
 
 @router.post("/change-plan/cancel-scheduled")
 def cancel_scheduled_plan_change(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
-    """Cancel a pending FAST period-end downgrade and keep the current plan.
+    """Cancel a pending FAST period-end subscription change.
 
     Stripe's schedule ``release`` operation removes future scheduled phases but
     leaves the underlying subscription active on its current price.
@@ -1083,7 +1087,7 @@ def cancel_scheduled_plan_change(user: User = Depends(get_current_user), db: Ses
         current_sub = stripe.Subscription.retrieve(item.external_subscription_id, expand=["items.data.price"])
         pending = _scheduled_plan_change_payload(db, item)
         if not pending:
-            raise HTTPException(status_code=409, detail="There is no scheduled FAST downgrade to cancel")
+            raise HTTPException(status_code=409, detail="There is no scheduled FAST subscription change to cancel")
 
         schedule_ref = _obj_get(current_sub, "schedule")
         schedule_id = str(_obj_get(schedule_ref, "id", schedule_ref) or "").strip()
@@ -1100,24 +1104,24 @@ def cancel_scheduled_plan_change(user: User = Depends(get_current_user), db: Ses
         db.add(
             AuditLog(
                 admin_user_id=user.id,
-                action="subscription_downgrade_cancelled",
+                action="subscription_scheduled_change_cancelled",
                 category="billing",
                 target_type="organisation",
                 target_id=organisation_id,
                 target_label=str(organisation_id),
-                details="Scheduled subscription downgrade cancelled; current plan retained.",
+                details="Scheduled subscription change cancelled; current plan and billing interval retained.",
             )
         )
         db.commit()
         return {
             "cancelled": True,
-            "message": "Scheduled downgrade cancelled. Your current FAST plan will continue.",
+            "message": "Scheduled billing change cancelled. Your current FAST subscription will continue unchanged.",
             "subscription": subscription_payload(db, organisation_id),
         }
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Stripe scheduled downgrade could not be cancelled: {exc}") from exc
+        raise HTTPException(status_code=502, detail=f"Stripe scheduled subscription change could not be cancelled: {exc}") from exc
 
 
 @router.post("/portal")

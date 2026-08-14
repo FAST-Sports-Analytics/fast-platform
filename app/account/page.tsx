@@ -33,7 +33,7 @@ type Subscription = {
   device_limit?: number | null;
   plan?: Plan | null;
   scheduled_plan_change?: {
-    type: "downgrade";
+    type: "downgrade" | "billing_interval";
     plan: Plan;
     billing_interval: "monthly" | "annual";
     effective_at?: string | null;
@@ -90,7 +90,7 @@ export default function AccountPage() {
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [planPreview, setPlanPreview] = useState<PlanChangePreview | null>(null);
-  const [cancelDowngradeOpen, setCancelDowngradeOpen] = useState(false);
+  const [cancelScheduledChangeOpen, setCancelScheduledChangeOpen] = useState(false);
 
   function token() {
     return typeof window === "undefined" ? "" : window.sessionStorage.getItem("fast_access_token") || "";
@@ -167,6 +167,16 @@ export default function AccountPage() {
   );
   const switchingToAnnualBilling = billingIntervalOnlyChange && planPreview?.target_billing_interval === "annual";
   const switchingToMonthlyBilling = billingIntervalOnlyChange && planPreview?.target_billing_interval === "monthly";
+  const scheduledBillingIntervalChange = Boolean(
+    subscription?.scheduled_plan_change?.type === "billing_interval"
+    || (subscription?.scheduled_plan_change?.plan.id === subscription?.plan?.id
+      && subscription?.scheduled_plan_change?.billing_interval !== subscription?.billing_interval)
+  );
+  const scheduledTargetPrice = subscription?.scheduled_plan_change
+    ? subscription.scheduled_plan_change.billing_interval === "annual"
+      ? `${money(subscription.scheduled_plan_change.plan.annual_price_pence)}/year`
+      : `${money(subscription.scheduled_plan_change.plan.monthly_price_pence)}/month`
+    : "";
 
   async function changePlan(plan: Plan, interval: "monthly" | "annual") {
     if (!subscription?.plan) return;
@@ -209,7 +219,11 @@ export default function AccountPage() {
         }),
       });
       if (data.effective === "period_end") {
-        setMessage(`Downgrade scheduled. FAST ${planPreview.target_plan.name} will take effect on ${dateLabel(data.effective_at)}. Your current access remains active until then.`);
+        if (billingIntervalOnlyChange) {
+          setMessage(`Billing change scheduled. FAST ${planPreview.target_plan.name} will switch to ${planPreview.target_billing_interval} billing on ${dateLabel(data.effective_at)}. Your current ${planPreview.current_billing_interval} plan remains active until then.`);
+        } else {
+          setMessage(`Downgrade scheduled. FAST ${planPreview.target_plan.name} will take effect on ${dateLabel(data.effective_at)}. Your current access remains active until then.`);
+        }
         await load();
       } else if (data.change === "unchanged") {
         setMessage("Your subscription is already on that plan and billing interval.");
@@ -225,17 +239,17 @@ export default function AccountPage() {
     }
   }
 
-  async function cancelScheduledDowngrade() {
+  async function cancelScheduledChange() {
     setWorking(true);
     setMessage("");
     setError("");
     try {
       const data = await api("/api/v1/subscriptions/change-plan/cancel-scheduled", { method: "POST" });
-      setMessage(data.message || "Scheduled downgrade cancelled. Your current FAST plan will continue.");
-      setCancelDowngradeOpen(false);
+      setMessage(data.message || "Scheduled subscription change cancelled. Your current FAST subscription will continue unchanged.");
+      setCancelScheduledChangeOpen(false);
       await load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "FAST Cloud could not cancel the scheduled downgrade.");
+      setError(err instanceof Error ? err.message : "FAST Cloud could not cancel the scheduled subscription change.");
     } finally {
       setWorking(false);
     }
@@ -279,10 +293,12 @@ export default function AccountPage() {
       {message && <div className="account-message success">{message}</div>}
       {subscription?.scheduled_plan_change && <div className="account-scheduled-change">
         <div>
-          <strong>Downgrade scheduled</strong>
-          <span>FAST {subscription.scheduled_plan_change.plan.name} will take effect on {dateLabel(subscription.scheduled_plan_change.effective_at)}. Your FAST {subscription.plan?.name || "current"} access remains active until then.</span>
+          <strong>{scheduledBillingIntervalChange ? "Billing change scheduled" : "Downgrade scheduled"}</strong>
+          <span>{scheduledBillingIntervalChange
+            ? `Your FAST ${subscription.plan?.name || "subscription"} subscription will switch from ${subscription.billing_interval} billing to ${subscription.scheduled_plan_change.billing_interval} billing on ${dateLabel(subscription.scheduled_plan_change.effective_at)}. Your current ${subscription.billing_interval} plan remains active until then.`
+            : `FAST ${subscription.scheduled_plan_change.plan.name} will take effect on ${dateLabel(subscription.scheduled_plan_change.effective_at)}. Your FAST ${subscription.plan?.name || "current"} access remains active until then.`}</span>
         </div>
-        <button className="button button-quiet button-small" type="button" disabled={working} onClick={() => setCancelDowngradeOpen(true)}>Cancel scheduled downgrade</button>
+        <button className="button button-quiet button-small" type="button" disabled={working} onClick={() => setCancelScheduledChangeOpen(true)}>{scheduledBillingIntervalChange ? "Cancel scheduled billing change" : "Cancel scheduled downgrade"}</button>
       </div>}
 
       {!user.organisation_admin ? <section className="account-panel">
@@ -320,8 +336,8 @@ export default function AccountPage() {
                   <li>{plan.cloud_storage_gb} GB cloud storage</li>
                 </ul>
                 <div className="account-plan-actions">
-                  <button className="button button-primary" type="button" disabled={working || Boolean(subscription?.scheduled_plan_change) || (current && subscription?.billing_interval === "monthly")} onClick={() => changePlan(plan, "monthly")}>{subscription?.scheduled_plan_change?.plan.id === plan.id && subscription?.scheduled_plan_change?.billing_interval === "monthly" ? "Downgrade scheduled" : current && subscription?.billing_interval === "monthly" ? "Current monthly plan" : "Choose monthly"}</button>
-                  <button className="button button-quiet" type="button" disabled={working || Boolean(subscription?.scheduled_plan_change) || (current && subscription?.billing_interval === "annual")} onClick={() => changePlan(plan, "annual")}>{subscription?.scheduled_plan_change?.plan.id === plan.id && subscription?.scheduled_plan_change?.billing_interval === "annual" ? "Downgrade scheduled" : current && subscription?.billing_interval === "annual" ? "Current annual plan" : "Choose annual"}</button>
+                  <button className="button button-primary" type="button" disabled={working || Boolean(subscription?.scheduled_plan_change) || (current && subscription?.billing_interval === "monthly")} onClick={() => changePlan(plan, "monthly")}>{subscription?.scheduled_plan_change?.plan.id === plan.id && subscription?.scheduled_plan_change?.billing_interval === "monthly" ? (scheduledBillingIntervalChange ? "Billing change scheduled" : "Downgrade scheduled") : current && subscription?.billing_interval === "monthly" ? "Current monthly plan" : "Choose monthly"}</button>
+                  <button className="button button-quiet" type="button" disabled={working || Boolean(subscription?.scheduled_plan_change) || (current && subscription?.billing_interval === "annual")} onClick={() => changePlan(plan, "annual")}>{subscription?.scheduled_plan_change?.plan.id === plan.id && subscription?.scheduled_plan_change?.billing_interval === "annual" ? (scheduledBillingIntervalChange ? "Billing change scheduled" : "Downgrade scheduled") : current && subscription?.billing_interval === "annual" ? "Current annual plan" : "Choose annual"}</button>
                 </div>
               </article>;
             })}
@@ -331,28 +347,30 @@ export default function AccountPage() {
       </>}
     </div>
 
-    {cancelDowngradeOpen && subscription?.scheduled_plan_change && <div className="account-modal-backdrop" role="presentation" onMouseDown={() => !working && setCancelDowngradeOpen(false)}>
-      <section className="account-modal" role="dialog" aria-modal="true" aria-labelledby="cancel-downgrade-title" onMouseDown={event => event.stopPropagation()}>
-        <button className="account-modal-close" type="button" aria-label="Close" disabled={working} onClick={() => setCancelDowngradeOpen(false)}>×</button>
+    {cancelScheduledChangeOpen && subscription?.scheduled_plan_change && <div className="account-modal-backdrop" role="presentation" onMouseDown={() => !working && setCancelScheduledChangeOpen(false)}>
+      <section className="account-modal" role="dialog" aria-modal="true" aria-labelledby="cancel-scheduled-change-title" onMouseDown={event => event.stopPropagation()}>
+        <button className="account-modal-close" type="button" aria-label="Close" disabled={working} onClick={() => setCancelScheduledChangeOpen(false)}>×</button>
         <p className="eyebrow">Confirm subscription change</p>
-        <h2 id="cancel-downgrade-title">Cancel your scheduled downgrade?</h2>
+        <h2 id="cancel-scheduled-change-title">{scheduledBillingIntervalChange ? "Cancel scheduled billing change?" : "Cancel your scheduled downgrade?"}</h2>
 
         <div className="account-confirm-plans">
           <article><small>Keep</small><strong>FAST {subscription.plan?.name || "current plan"}</strong><span>{currentPrice}</span></article>
           <div className="account-confirm-arrow">←</div>
-          <article><small>Cancel scheduled change</small><strong>FAST {subscription.scheduled_plan_change.plan.name}</strong><span>Was due {dateLabel(subscription.scheduled_plan_change.effective_at)}</span></article>
+          <article><small>Cancel scheduled change</small><strong>FAST {subscription.scheduled_plan_change.plan.name}</strong><span>{scheduledBillingIntervalChange ? scheduledTargetPrice : `Was due ${dateLabel(subscription.scheduled_plan_change.effective_at)}`}</span></article>
         </div>
 
         <div className="account-confirm-summary">
           <div className="total"><span>Amount due now</span><strong>{money(0)}</strong></div>
           <div><span>Your current plan</span><strong>Continues normally</strong></div>
-          <div><span>Scheduled downgrade</span><strong>Removed</strong></div>
+          <div><span>{scheduledBillingIntervalChange ? "Scheduled billing change" : "Scheduled downgrade"}</span><strong>Removed</strong></div>
         </div>
-        <p className="account-confirm-copy">Cancelling the scheduled downgrade keeps FAST {subscription.plan?.name || "your current plan"} active. Your products, seats, devices and current renewal price remain unchanged.</p>
+        <p className="account-confirm-copy">{scheduledBillingIntervalChange
+          ? `Cancelling this scheduled billing change keeps FAST ${subscription.plan?.name || "your current plan"} on ${subscription.billing_interval} billing. Your products, seats, devices and current renewal price remain unchanged.`
+          : <>Cancelling the scheduled downgrade keeps FAST {subscription.plan?.name || "your current plan"} active. Your products, seats, devices and current renewal price remain unchanged.</>}</p>
 
         <div className="account-modal-actions">
-          <button className="button button-quiet" type="button" disabled={working} onClick={() => setCancelDowngradeOpen(false)}>Keep scheduled downgrade</button>
-          <button className="button button-primary" type="button" disabled={working} onClick={cancelScheduledDowngrade}>{working ? "Processing…" : "Cancel scheduled downgrade"}</button>
+          <button className="button button-quiet" type="button" disabled={working} onClick={() => setCancelScheduledChangeOpen(false)}>{scheduledBillingIntervalChange ? "Keep scheduled billing change" : "Keep scheduled downgrade"}</button>
+          <button className="button button-primary" type="button" disabled={working} onClick={cancelScheduledChange}>{working ? "Processing…" : scheduledBillingIntervalChange ? "Cancel scheduled billing change" : "Cancel scheduled downgrade"}</button>
         </div>
         <p className="account-confirm-footnote">Billing is handled securely by Stripe. Cancelling this scheduled change does not create an additional charge.</p>
       </section>
@@ -394,7 +412,9 @@ export default function AccountPage() {
             <div><span>FAST {planPreview.target_plan.name} starts</span><strong>{dateLabel(planPreview.effective_at)}</strong></div>
             <div><span>New renewal price</span><strong>{money(planPreview.next_renewal_amount_pence || 0)}/{planPreview.target_billing_interval === "annual" ? "year" : "month"}</strong></div>
           </div>
-          <p className="account-confirm-copy">You keep your current FAST {planPreview.current_plan?.name || "plan"} access until the end of the paid period. After that, your limits and product access change to FAST {planPreview.target_plan.name}; installed applications and local data are not deleted.</p>
+          <p className="account-confirm-copy">{billingIntervalOnlyChange
+            ? `You keep your current FAST ${planPreview.current_plan?.name || "plan"} access until the end of the paid ${planPreview.current_billing_interval} period. On ${dateLabel(planPreview.effective_at)}, your subscription switches to ${planPreview.target_billing_interval} billing at ${money(planPreview.next_renewal_amount_pence || 0)}/${planPreview.target_billing_interval === "annual" ? "year" : "month"}. Your products, seats, devices, installed applications and local data remain unchanged.`
+            : <>You keep your current FAST {planPreview.current_plan?.name || "plan"} access until the end of the paid period. After that, your limits and product access change to FAST {planPreview.target_plan.name}; installed applications and local data are not deleted.</>}</p>
         </>}
 
         <div className="account-modal-actions">
