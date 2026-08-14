@@ -1709,7 +1709,15 @@ async def stripe_webhook(request: Request) -> dict:
                         sync_source = stripe.Subscription.retrieve(referenced_subscription_id)
                     except Exception:
                         sync_source = data
-                _sync_stripe_subscription(db, sync_source, grace_reference_at=event_created_at)
+                # A subscription.updated event can be the first Stripe event that
+                # moves a failed Test Clock subscription to past_due. If we seed
+                # grace from the webhook event timestamp here, the later invoice
+                # failure correctly preserves that deadline -- but it preserves a
+                # real wall-clock deadline instead of simulated time. Resolve the
+                # Test Clock for subscription lifecycle events too, so whichever
+                # event establishes grace first uses the same simulated reference.
+                subscription_occurred_at = _stripe_test_clock_datetime(sync_source) or event_created_at
+                _sync_stripe_subscription(db, sync_source, grace_reference_at=subscription_occurred_at)
                 matched_item = _subscription_for_stripe_reference(
                     db,
                     subscription_id=referenced_subscription_id,
