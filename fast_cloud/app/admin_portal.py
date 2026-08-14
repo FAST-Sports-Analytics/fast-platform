@@ -30,7 +30,7 @@ from app.core.security import (
     verify_password,
 )
 from app.db.session import engine, get_db
-from app.models import AuditLog, Club, ClubMember, CrashReport, DeviceActivation, DeviceAuditLog, Licence, LicenceTemplate, Organisation, Product, Release, RemoteCommand, Sport, User
+from app.models import AuditLog, BillingWebhookEvent, Club, ClubMember, CrashReport, DeviceActivation, DeviceAuditLog, Licence, LicenceTemplate, Organisation, OrganisationSubscription, Product, Release, RemoteCommand, Sport, User
 from app.releases import MAX_PACKAGE_BYTES as MAX_RELEASE_PACKAGE_BYTES, PACKAGES_DIR as RELEASE_PACKAGES_DIR, validate_release_package
 
 router = APIRouter(prefix="/admin", tags=["Admin Portal"])
@@ -476,10 +476,31 @@ def update_user_role(
     return RedirectResponse("/admin/users?message=Administrator+access+unchanged.", status_code=303)
 
 
+def _hard_delete_user(db: Session, user: User) -> None:
+    """Delete a customer account and records that cannot outlive that account."""
+    licence_ids = [item.id for item in db.scalars(select(Licence).where(Licence.user_id == user.id)).all()]
+    if licence_ids:
+        device_ids = [item.id for item in db.scalars(select(DeviceActivation).where(DeviceActivation.licence_id.in_(licence_ids))).all()]
+        if device_ids:
+            db.query(RemoteCommand).filter(RemoteCommand.device_activation_id.in_(device_ids)).delete(synchronize_session=False)
+            db.query(DeviceAuditLog).filter(DeviceAuditLog.device_activation_id.in_(device_ids)).delete(synchronize_session=False)
+        db.query(DeviceActivation).filter(DeviceActivation.licence_id.in_(licence_ids)).delete(synchronize_session=False)
+        db.query(Licence).filter(Licence.id.in_(licence_ids)).delete(synchronize_session=False)
+    db.query(ClubMember).filter(ClubMember.user_id == user.id).delete(synchronize_session=False)
+    db.query(Club).filter(Club.owner_user_id == user.id).update({Club.owner_user_id: None}, synchronize_session=False)
+    db.query(CrashReport).filter(CrashReport.user_id == user.id).update({CrashReport.user_id: None}, synchronize_session=False)
+    db.query(Release).filter(Release.created_by_user_id == user.id).update({Release.created_by_user_id: None}, synchronize_session=False)
+    db.query(RemoteCommand).filter(RemoteCommand.requested_by_user_id == user.id).delete(synchronize_session=False)
+    db.query(DeviceAuditLog).filter(DeviceAuditLog.admin_user_id == user.id).delete(synchronize_session=False)
+    db.query(AuditLog).filter(AuditLog.admin_user_id == user.id).delete(synchronize_session=False)
+    db.delete(user)
+
+
 @router.post("/users/{user_id}/delete")
 def delete_user(
     user_id: int,
     request: Request,
+    return_to: str = Form("/admin/users"),
     db: Session = Depends(get_db),
 ):
     admin = require_portal_admin(request, db)
@@ -491,16 +512,12 @@ def delete_user(
             "/admin/users?error=You+cannot+delete+your+own+administrator+account.",
             status_code=303,
         )
-    if user.licences:
-        return RedirectResponse(
-            "/admin/users?error=This+user+has+assigned+licences.+Reassign+or+remove+them+before+deleting+the+user.",
-            status_code=303,
-        )
     label = user.email
-    _record_audit(db, admin, "deleted", "user", target_type="user", target_id=user.id, target_label=label, details="Customer account deleted.")
-    db.delete(user)
+    _record_audit(db, admin, "deleted", "user", target_type="user", target_id=user.id, target_label=label, details="Customer account permanently deleted; licences, memberships and active device records removed.")
+    _hard_delete_user(db, user)
     db.commit()
-    return RedirectResponse("/admin/users?message=User+deleted.", status_code=303)
+    separator = "&" if "?" in return_to else "?"
+    return RedirectResponse(f"{return_to}{separator}message=User+deleted+permanently.", status_code=303)
 
 
 
@@ -819,6 +836,62 @@ def update_organisation(
     _record_audit(db, admin, "updated", "organisation", target_type="organisation", target_id=item.id, target_label=item.name, details=f"Organisation details updated. Status: {item.status}.")
     db.commit()
     return RedirectResponse(f"/admin/organisations/{item.id}?message=Organisation+updated.", status_code=303)
+
+
+@router.post("/organisations/{organisation_id}/delete")
+def delete_organisation(
+    organisation_id: int,
+    request: Request,
+    confirm_name: str = Form(...),
+    db: Session = Depends(get_db),
+):
+    admin = require_portal_admin(request, db)
+    if admin.organisation_id is not None:
+        raise HTTPException(status_code=403, detail="Only the FAST platform administrator can delete organisations")
+    organisation = db.get(Organisation, organisation_id)
+    if not organisation:
+        raise HTTPException(status_code=404, detail="Organisation not found")
+    if confirm_name.strip() != organisation.name:
+        return RedirectResponse(f"/admin/organisations/{organisation_id}?error=Organisation+name+did+not+match.+Nothing+was+deleted.", status_code=303)
+
+    subscription = db.scalar(select(OrganisationSubscription).where(OrganisationSubscription.organisation_id == organisation.id))
+    if subscription and subscription.external_subscription_id and str(subscription.status or '').lower() not in {"cancelled", "expired"}:
+        return RedirectResponse(
+            f"/admin/organisations/{organisation_id}?error=This+organisation+still+has+a+Stripe+subscription.+Cancel+or+expire+the+billing+subscription+before+permanent+deletion.",
+            status_code=303,
+        )
+
+    label = organisation.name
+    _record_audit(db, admin, "deleted", "organisation", target_type="organisation", target_id=organisation.id, target_label=label, details="Organisation permanently deleted from FAST Cloud.")
+
+    # Keep billing/crash diagnostics usable without retaining the organisation row.
+    db.query(BillingWebhookEvent).filter(BillingWebhookEvent.organisation_id == organisation.id).update({BillingWebhookEvent.organisation_id: None, BillingWebhookEvent.matched: False}, synchronize_session=False)
+    db.query(CrashReport).filter(CrashReport.organisation_id == organisation.id).update({CrashReport.organisation_id: None}, synchronize_session=False)
+    if subscription:
+        db.delete(subscription)
+
+    clubs = db.scalars(select(Club).where(Club.organisation_id == organisation.id)).all()
+    for club in clubs:
+        licence_ids = [item.id for item in db.scalars(select(Licence).where(Licence.club_id == club.id)).all()]
+        if licence_ids:
+            device_ids = [item.id for item in db.scalars(select(DeviceActivation).where(DeviceActivation.licence_id.in_(licence_ids))).all()]
+            if device_ids:
+                db.query(RemoteCommand).filter(RemoteCommand.device_activation_id.in_(device_ids)).delete(synchronize_session=False)
+                db.query(DeviceAuditLog).filter(DeviceAuditLog.device_activation_id.in_(device_ids)).delete(synchronize_session=False)
+            db.query(DeviceActivation).filter(DeviceActivation.licence_id.in_(licence_ids)).delete(synchronize_session=False)
+            db.query(Licence).filter(Licence.id.in_(licence_ids)).delete(synchronize_session=False)
+        db.query(ClubMember).filter(ClubMember.club_id == club.id).delete(synchronize_session=False)
+        db.delete(club)
+
+    users = db.scalars(select(User).where(User.organisation_id == organisation.id)).all()
+    for user in users:
+        if user.id == admin.id:
+            continue
+        _hard_delete_user(db, user)
+
+    db.delete(organisation)
+    db.commit()
+    return RedirectResponse("/admin/organisations?message=Organisation+deleted+permanently.", status_code=303)
 
 
 @router.post("/organisations/{organisation_id}/clubs")
