@@ -972,18 +972,19 @@ def _invoice_line_is_proration(line) -> bool:
     return bool(_obj_get(details, "proration", False))
 
 
-def _preview_plan_change_invoice(current_sub, subscription_item_id: str, target_price_id: str, quantity: int, proration_date: int):
+def _preview_plan_change_invoice(current_sub, subscription_item_id: str, target_price_id: str, quantity: int):
     """Ask Stripe for a non-mutating preview of the proposed upgrade invoice.
 
     Stripe's Create Preview Invoice API is the source of truth for proration.
-    Passing the same proration timestamp into the real subscription update keeps
-    the confirmed estimate and the eventual charge aligned.
+    Do not force a proration_date here. Stripe test clocks can be far ahead of
+    the host system clock, and a host-derived timestamp may fall outside the
+    subscription's active billing phase. Stripe already knows the subscription's
+    effective current time and will calculate the preview against it.
     """
     params = {
         "subscription": str(_obj_get(current_sub, "id", "") or ""),
         "subscription_details": {
             "items": [{"id": subscription_item_id, "price": target_price_id, "quantity": quantity}],
-            "proration_date": proration_date,
             "proration_behavior": "always_invoice",
         },
     }
@@ -1071,14 +1072,12 @@ def preview_subscription_plan_change(payload: ChangePlanRequest, user: User = De
                 "proration_date": None,
             }
 
-        proration_date = int(preview_now.timestamp())
         quantity = max(1, int(_obj_get(first_item, "quantity", 1) or 1))
         preview = _preview_plan_change_invoice(
             current_sub,
             subscription_item_id,
             str(_obj_get(target_price, "id")),
             quantity,
-            proration_date,
         )
         lines = list(_obj_get(_obj_get(preview, "lines", {}), "data", []) or [])
         proration_lines = [line for line in lines if _invoice_line_is_proration(line)]
@@ -1093,7 +1092,10 @@ def preview_subscription_plan_change(payload: ChangePlanRequest, user: User = De
             "amount_due_now_pence": amount_due,
             "credit_pence": credit,
             "upgrade_charge_pence": charge,
-            "proration_date": proration_date,
+            # Kept in the response for backwards compatibility with the website,
+            # but upgrades no longer send a host-clock proration timestamp back
+            # to Stripe.
+            "proration_date": None,
         }
     except HTTPException:
         raise
@@ -1272,8 +1274,11 @@ def change_subscription_plan(payload: ChangePlanRequest, user: User = Depends(ge
             # of the old plan and invoices only the net proration now.
             "proration_behavior": "always_invoice",
         }
-        if payload.proration_date:
-            update_params["proration_date"] = int(payload.proration_date)
+        # Let Stripe choose the effective proration timestamp. In test-clock
+        # subscriptions the simulated Stripe time can differ substantially from
+        # datetime.now() on Railway; forwarding the preview/client timestamp can
+        # therefore be outside the active subscription phase and Stripe rejects
+        # the upgrade.
         updated = stripe.Subscription.modify(item.external_subscription_id, **update_params)
 
         # Stripe can leave upgrade prorations as pending invoice items even
