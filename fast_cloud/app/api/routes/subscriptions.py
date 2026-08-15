@@ -1001,9 +1001,17 @@ def preview_subscription_plan_change(payload: ChangePlanRequest, user: User = De
     organisation_id = _require_org_admin(user)
     if not _stripe_ready():
         raise HTTPException(status_code=503, detail="Online billing is not configured yet")
+    # Reconcile Stripe first so a newly failed renewal cannot slip through on a
+    # stale local "active" state.
+    subscription_payload(db, organisation_id, refresh_provider=True)
     item = db.scalar(select(OrganisationSubscription).where(OrganisationSubscription.organisation_id == organisation_id))
     if not item or item.billing_provider != "stripe" or not item.external_subscription_id:
         raise HTTPException(status_code=409, detail="This organisation does not have an active Stripe subscription")
+    if str(item.status or "").lower() in {"past_due", "grace_period"}:
+        raise HTTPException(
+            status_code=409,
+            detail="Payment required. Your FAST subscription has an overdue payment. Please settle the outstanding balance before changing your plan.",
+        )
     target = db.get(SubscriptionPlan, payload.plan_id)
     if not target or not target.active:
         raise HTTPException(status_code=404, detail="Subscription plan not found")
@@ -1142,9 +1150,17 @@ def change_subscription_plan(payload: ChangePlanRequest, user: User = Depends(ge
     organisation_id = _require_org_admin(user)
     if not _stripe_ready():
         raise HTTPException(status_code=503, detail="Online billing is not configured yet")
+    # Reconcile Stripe first so a newly failed renewal cannot slip through on a
+    # stale local "active" state.
+    subscription_payload(db, organisation_id, refresh_provider=True)
     item = db.scalar(select(OrganisationSubscription).where(OrganisationSubscription.organisation_id == organisation_id))
     if not item or item.billing_provider != "stripe" or not item.external_subscription_id:
         raise HTTPException(status_code=409, detail="This organisation does not have an active Stripe subscription")
+    if str(item.status or "").lower() in {"past_due", "grace_period"}:
+        raise HTTPException(
+            status_code=409,
+            detail="Payment required. Your FAST subscription has an overdue payment. Please settle the outstanding balance before changing your plan.",
+        )
     target = db.get(SubscriptionPlan, payload.plan_id)
     if not target or not target.active:
         raise HTTPException(status_code=404, detail="Subscription plan not found")
