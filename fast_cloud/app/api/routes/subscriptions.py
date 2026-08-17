@@ -1124,12 +1124,48 @@ def preview_subscription_plan_change(payload: ChangePlanRequest, user: User = De
         )
         lines = list(_obj_get(_obj_get(preview, "lines", {}), "data", []) or [])
         proration_lines = [line for line in lines if _invoice_line_is_proration(line)]
-        credit = sum(abs(min(0, int(_obj_get(line, "amount", 0) or 0))) for line in proration_lines)
-        charge = sum(max(0, int(_obj_get(line, "amount", 0) or 0)) for line in proration_lines)
-        proration_total = charge - credit
-        amount_due = max(0, proration_total)
-        if not proration_lines:
-            amount_due = max(0, int(_obj_get(preview, "amount_due", 0) or 0))
+
+        # Stripe's newer preview-invoice line shape does not consistently expose
+        # the legacy ``proration`` flag on both sides of an interval change.
+        # In particular, the credit for unused annual time can be a negative
+        # preview line whose parent metadata is shaped differently from the new
+        # monthly charge.  Restricting the credit calculation to lines detected
+        # by _invoice_line_is_proration therefore made a real annual credit show
+        # as £0 in FAST even though Stripe had included it in the preview.
+        #
+        # A negative line in this non-mutating plan-change preview is a credit,
+        # so include all negative preview lines.  Positive display charges still
+        # prefer explicitly marked proration lines.  Stripe's amount_due remains
+        # authoritative for the actual amount the customer would pay now.
+        negative_lines = [
+            line for line in lines
+            if int(_obj_get(line, "amount", 0) or 0) < 0
+        ]
+        credit = sum(
+            abs(int(_obj_get(line, "amount", 0) or 0))
+            for line in negative_lines
+        )
+
+        positive_proration_lines = [
+            line for line in proration_lines
+            if int(_obj_get(line, "amount", 0) or 0) > 0
+        ]
+        if positive_proration_lines:
+            charge = sum(
+                int(_obj_get(line, "amount", 0) or 0)
+                for line in positive_proration_lines
+            )
+        else:
+            charge = sum(
+                max(0, int(_obj_get(line, "amount", 0) or 0))
+                for line in lines
+            )
+
+        preview_amount_due = _obj_get(preview, "amount_due")
+        if preview_amount_due is not None:
+            amount_due = max(0, int(preview_amount_due or 0))
+        else:
+            amount_due = max(0, charge - credit)
         return {
             **common,
             "amount_due_now_pence": amount_due,
