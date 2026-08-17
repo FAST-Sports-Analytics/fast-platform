@@ -1011,14 +1011,14 @@ def _invoice_line_is_proration(line) -> bool:
     return bool(_obj_get(details, "proration", False))
 
 
-def _preview_plan_change_invoice(current_sub, subscription_item_id: str, target_price_id: str, quantity: int):
+def _preview_plan_change_invoice(current_sub, subscription_item_id: str, target_price_id: str, quantity: int, proration_date: int | None = None):
     """Ask Stripe for a non-mutating preview of the proposed upgrade invoice.
 
     Stripe's Create Preview Invoice API is the source of truth for proration.
-    Do not force a proration_date here. Stripe test clocks can be far ahead of
-    the host system clock, and a host-derived timestamp may fall outside the
-    subscription's active billing phase. Stripe already knows the subscription's
-    effective current time and will calculate the preview against it.
+    When a Stripe Test Clock is attached, pass its frozen provider timestamp as
+    the proration date. This keeps previews aligned with simulated Stripe time
+    rather than Railway's wall clock. Live subscriptions can omit the value and
+    let Stripe choose the effective timestamp.
     """
     params = {
         "subscription": str(_obj_get(current_sub, "id", "") or ""),
@@ -1027,6 +1027,8 @@ def _preview_plan_change_invoice(current_sub, subscription_item_id: str, target_
             "proration_behavior": "always_invoice",
         },
     }
+    if proration_date is not None:
+        params["subscription_details"]["proration_date"] = int(proration_date)
     customer = str(_obj_get(_obj_get(current_sub, "customer"), "id", _obj_get(current_sub, "customer", "")) or "").strip()
     if customer:
         params["customer"] = customer
@@ -1078,7 +1080,11 @@ def preview_subscription_plan_change(payload: ChangePlanRequest, user: User = De
         target_amount = target.monthly_price_pence if interval == "monthly" else target.annual_price_pence
         is_downgrade = _is_plan_downgrade(current_plan, target, current_interval, interval)
         period_end = _subscription_period_end(current_sub)
-        preview_now = datetime.now(timezone.utc)
+        # Billing previews must follow Stripe provider time. Test Clock customers
+        # can be months/years ahead of Railway's wall clock. Using wall time here
+        # produced impossible renewal dates and incorrect annual-plan credits.
+        preview_now = _stripe_test_clock_datetime(current_sub) or datetime.now(timezone.utc)
+        provider_proration_date = int(preview_now.timestamp()) if _stripe_test_clock_datetime(current_sub) else None
         # Stripe resets the billing date when the recurring interval changes
         # (for example monthly -> annual). Reflect that new cycle in the
         # confirmation instead of showing the old monthly period end.
@@ -1114,6 +1120,7 @@ def preview_subscription_plan_change(payload: ChangePlanRequest, user: User = De
             subscription_item_id,
             str(_obj_get(target_price, "id")),
             quantity,
+            provider_proration_date,
         )
         lines = list(_obj_get(_obj_get(preview, "lines", {}), "data", []) or [])
         proration_lines = [line for line in lines if _invoice_line_is_proration(line)]
@@ -1307,6 +1314,9 @@ def change_subscription_plan(payload: ChangePlanRequest, user: User = Depends(ge
             # of the old plan and invoices only the net proration now.
             "proration_behavior": "always_invoice",
         }
+        provider_now = _stripe_test_clock_datetime(current_sub)
+        if provider_now is not None:
+            update_params["proration_date"] = int(provider_now.timestamp())
         # Let Stripe choose the effective proration timestamp. In test-clock
         # subscriptions the simulated Stripe time can differ substantially from
         # datetime.now() on Railway; forwarding the preview/client timestamp can
