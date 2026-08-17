@@ -1344,7 +1344,20 @@ def change_subscription_plan(payload: ChangePlanRequest, user: User = Depends(ge
             if current_phase_start is None:
                 raise HTTPException(status_code=502, detail="Stripe subscription schedule has no current phase start date")
 
-            phase_end_ts = int(current_phase_end or period_end.timestamp())
+            # The live subscription period end is the authoritative boundary
+            # for a newly requested FAST period-end change. An existing Stripe
+            # schedule can have a much later current_phase.end_date left over
+            # from an earlier scheduled interval/plan change. Reusing that stale
+            # phase end postpones the new change (for example, Apr 2028 became
+            # Feb 2029). Shorten/rebuild the current schedule phase to the live
+            # subscription's current paid-period end instead.
+            phase_end_ts = int(period_end.timestamp())
+            current_phase_start_ts = int(current_phase_start)
+            if phase_end_ts <= current_phase_start_ts:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Stripe returned an invalid billing period boundary for the scheduled plan change",
+                )
             item.pending_downgrade_effective_at = period_end
             current_price = _obj_get(sub_items[0], "price", {}) or {}
             current_price_id = str(_obj_get(current_price, "id", "") or "").strip()
