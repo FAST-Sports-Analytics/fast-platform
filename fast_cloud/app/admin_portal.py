@@ -20,6 +20,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.core.seats import ALLOCATED_USER_STATUSES, allocated_user_count, effective_user_seat_limit, organisation_device_capacity
+from app.core.entitlements import ROLE_PRODUCTS, normalise_product
 from app.core.security import (
     create_admin_portal_token,
     decode_token,
@@ -210,6 +211,29 @@ def require_portal_admin(request: Request, db: Session) -> User:
 def _ensure_organisation_access(admin: User, organisation_id: int) -> None:
     if admin.organisation_id is not None and admin.organisation_id != organisation_id:
         raise HTTPException(status_code=403, detail="You cannot manage another organisation")
+
+
+def _role_allowed_organisation_products(role: str, organisation_products: list[str]) -> list[str]:
+    """Return organisation products the selected role is eligible to receive."""
+    role_key = str(role or "analyst").strip().lower()
+    allowed = ROLE_PRODUCTS.get(role_key, set())
+    if allowed is None:
+        return list(organisation_products)
+    return [
+        product
+        for product in organisation_products
+        if normalise_product(product) in allowed
+    ]
+
+
+def _product_label(value: str) -> str:
+    labels = {
+        "analysis": "FAST Analysis",
+        "viewer": "FAST Viewer",
+        "hub": "FAST Hub",
+        "scout": "FAST Scout",
+    }
+    return labels.get(normalise_product(value), str(value))
 
 
 @router.get("", response_class=HTMLResponse)
@@ -732,6 +756,10 @@ def organisation_profile(
         "selected_sports": selected_sports, "all_sports": all_sports, "organisation_users": organisation_users,
         "organisation_devices": organisation_devices, "organisation_audit": organisation_audit,
         "licence_products": licence_products, "licence_sports": licence_sports,
+        "role_product_map": {
+            role: _role_allowed_organisation_products(role, licence_products)
+            for role in ("administrator", "analyst", "coach", "scout")
+        },
         "message": message, "error": error,
     })
 
@@ -755,9 +783,18 @@ def create_organisation_user(
     seats = db.scalar(select(func.count(User.id)).where(User.organisation_id == organisation.id, User.status == "active")) or 0
     if seats >= organisation.max_seats:
         return RedirectResponse(f"/admin/organisations/{organisation_id}?error=This+organisation+has+used+all+available+seats.", status_code=303)
+    licence_products = sorted({
+        product
+        for club in organisation.clubs
+        for licence in club.licences
+        if licence.status == "active"
+        for product in json.loads(licence.products_json or "[]")
+    })
+    allowed_products = _role_allowed_organisation_products(role, licence_products)
+    assigned_products = [product for product in products if product in allowed_products]
     user = User(email=clean_email, full_name=full_name.strip() or None, password_hash=hash_password(password),
                 email_verified=True, status="active", role=role, is_admin=False, organisation_id=organisation.id,
-                products_json=json.dumps(products), sports_json=json.dumps(sports), must_change_password=True, invited_at=datetime.now(timezone.utc))
+                products_json=json.dumps(assigned_products), sports_json=json.dumps(sports), must_change_password=True, invited_at=datetime.now(timezone.utc))
     db.add(user); db.flush()
     _record_audit(db, admin, "created", "organisation_user", target_type="user", target_id=user.id, target_label=user.email, details=f"{role.title()} created for {organisation.name}.")
     db.commit()
@@ -773,15 +810,57 @@ def update_organisation_user(organisation_id: int, user_id: int, request: Reques
     if not user or user.organisation_id != organisation_id:
         raise HTTPException(status_code=404, detail="Organisation user not found")
     valid_roles = {"administrator", "analyst", "coach", "scout"}
+    organisation = db.get(Organisation, organisation_id)
+    assert organisation is not None
+    previous_role = str(user.role or "analyst").strip().lower()
+    previous_products = json.loads(user.products_json or "[]")
+
+    new_role = role if role in valid_roles else "analyst"
+    licence_products = sorted({
+        product
+        for club in organisation.clubs
+        for licence in club.licences
+        if licence.status == "active"
+        for product in json.loads(licence.products_json or "[]")
+    })
+    eligible_products = _role_allowed_organisation_products(new_role, licence_products)
+
     user.full_name = full_name.strip() or None
-    user.role = role if role in valid_roles else "analyst"
+    user.role = new_role
     user.is_admin = False
     user.status = status if status in {"active", "suspended"} else "active"
-    user.products_json = json.dumps(products)
+
+    # Promotions expand eligibility but do not grant new products automatically.
+    # Demotions always revoke products the new role is no longer permitted to use.
+    assigned_products = [product for product in products if product in eligible_products]
+    removed_products = [product for product in previous_products if product not in assigned_products]
+    newly_eligible = [product for product in eligible_products if product not in assigned_products]
+    user.products_json = json.dumps(assigned_products)
     user.sports_json = json.dumps(sports)
-    _record_audit(db, admin, "updated", "organisation_user", target_type="user", target_id=user.id, target_label=user.email, details=f"Role: {user.role}; status: {user.status}.")
+
+    details = [f"Role: {previous_role} -> {new_role}" if previous_role != new_role else f"Role: {new_role}", f"status: {user.status}"]
+    if removed_products:
+        details.append("revoked: " + ", ".join(removed_products))
+    if previous_role != new_role and newly_eligible:
+        details.append("eligible but not assigned: " + ", ".join(newly_eligible))
+    _record_audit(db, admin, "updated", "organisation_user", target_type="user", target_id=user.id, target_label=user.email, details="; ".join(details) + ".")
     db.commit()
-    return RedirectResponse(f"/admin/organisations/{organisation_id}?message=User+updated.", status_code=303)
+
+    if previous_role != new_role:
+        assigned_text = ", ".join(_product_label(value) for value in assigned_products) or "None"
+        if removed_products:
+            removed_text = ", ".join(_product_label(value) for value in removed_products)
+            message = f"Role updated to {new_role.title()}. Removed products no longer permitted: {removed_text}. Current assigned products: {assigned_text}."
+        elif newly_eligible:
+            eligible_text = ", ".join(_product_label(value) for value in newly_eligible)
+            message = f"Role updated to {new_role.title()}. Current assigned products: {assigned_text}. Newly eligible but not assigned: {eligible_text}."
+        else:
+            message = f"Role updated to {new_role.title()}. Current assigned products: {assigned_text}."
+    else:
+        message = "User access updated."
+
+    from urllib.parse import quote_plus
+    return RedirectResponse(f"/admin/organisations/{organisation_id}?message={quote_plus(message)}", status_code=303)
 
 
 

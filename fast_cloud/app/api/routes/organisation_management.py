@@ -250,6 +250,12 @@ def _overview(db: Session, organisation_id: int) -> dict:
             "role": item.role or "analyst",
             "status": item.status,
             "products": _loads(item.products_json, []),
+            "eligible_products": _role_allowed_products(item.role or "analyst", products),
+            "unassigned_eligible_products": [
+                product
+                for product in _role_allowed_products(item.role or "analyst", products)
+                if product not in _loads(item.products_json, [])
+            ],
             "sports": _loads(item.sports_json, []),
             "must_change_password": bool(item.must_change_password),
             "last_login_at": item.last_login_at.isoformat() if item.last_login_at else None,
@@ -372,6 +378,8 @@ def update_user(user_id: int, payload: UpdateUserRequest, user: User = Depends(g
     target = db.get(User, user_id)
     if not target or target.organisation_id != organisation_id:
         raise HTTPException(status_code=404, detail="Organisation user not found")
+    previous_role = str(target.role or "analyst").lower().strip()
+    previous_products = _loads(target.products_json, [])
     role = payload.role.lower().strip()
     if role not in {"administrator", "analyst", "coach", "scout"}:
         raise HTTPException(status_code=422, detail="Invalid role")
@@ -399,6 +407,17 @@ def update_user(user_id: int, payload: UpdateUserRequest, user: User = Depends(g
     assigned_sports = [v for v in payload.sports if v in allowed_sports]
     target.products_json = json.dumps(assigned_products)
     target.sports_json = json.dumps(assigned_sports)
+    removed_products = [value for value in previous_products if value not in assigned_products]
+    newly_eligible = [value for value in role_products if value not in assigned_products]
+    change_notes = [
+        f"Role {previous_role} -> {role}" if previous_role != role else f"Role {role}",
+        f"status {status}",
+        f"assigned products {', '.join(assigned_products) or 'none'}",
+    ]
+    if removed_products:
+        change_notes.append(f"removed because no longer permitted: {', '.join(removed_products)}")
+    if previous_role != role and newly_eligible:
+        change_notes.append(f"eligible but not assigned: {', '.join(newly_eligible)}")
     _audit(
         db,
         user,
@@ -406,7 +425,7 @@ def update_user(user_id: int, payload: UpdateUserRequest, user: User = Depends(g
         "organisation_user",
         target.id,
         target.email,
-        f"Role {role}; status {status}; products {', '.join(assigned_products) or 'none'}; sports {', '.join(assigned_sports) or 'none'}.",
+        "; ".join(change_notes) + ".",
     )
     db.commit()
     return _overview(db, organisation_id)
