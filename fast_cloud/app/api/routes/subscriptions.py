@@ -1371,6 +1371,15 @@ def change_subscription_plan(payload: ChangePlanRequest, user: User = Depends(ge
                         "items": [{"price": target_price_id, "quantity": quantity}],
                         "duration": {"interval": target_duration_interval, "interval_count": 1},
                         "metadata": metadata,
+                        # FAST period-end plan/interval changes begin a new paid
+                        # billing cycle at the phase boundary.  This is essential
+                        # for Stripe subscriptions using flexible billing mode:
+                        # flexible mode deliberately preserves the old billing
+                        # cycle anchor unless we explicitly reset it.  Without
+                        # phase_start, a Monthly -> Annual downgrade can enter
+                        # the annual phase without charging the annual price
+                        # until the following year.
+                        "billing_cycle_anchor": "phase_start",
                         "proration_behavior": "none",
                     },
                 ],
