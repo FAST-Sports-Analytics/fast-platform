@@ -20,7 +20,7 @@ from app.core.security import (
     hash_password,
     verify_password,
 )
-from app.api.deps import get_current_user
+from app.api.deps import get_authenticated_user, get_current_user
 from app.api.routes.subscriptions import subscription_payload
 from app.db.session import get_db
 from app.models import AuditLog, Club, ClubMember, DeviceActivation, DeviceAuditLog, Licence, User
@@ -146,11 +146,6 @@ def _access_role_for_licence(db: Session, user: User, licence: Licence) -> str:
     """
     if bool(user.is_admin and user.organisation_id is None):
         return "administrator"
-    # A direct organisation account's organisation role is authoritative.
-    # Club membership roles are only used for users who do not have a direct
-    # organisation role for this organisation.
-    if user.organisation_id is not None:
-        return str(user.role or "analyst").strip().lower()
     if getattr(licence, "owner_type", "individual") == "club" and getattr(licence, "club_id", None):
         membership = db.scalar(select(ClubMember).where(
             ClubMember.club_id == licence.club_id,
@@ -417,7 +412,7 @@ def refresh(payload: RefreshRequest, db: Session = Depends(get_db)) -> TokenResp
 @router.post("/session")
 def session_status(
     payload: SessionStatusRequest,
-    user: User = Depends(get_current_user),
+    user: User = Depends(get_authenticated_user),
     db: Session = Depends(get_db),
 ) -> dict:
     """Return the authoritative account, licence and device entitlement state.
@@ -425,6 +420,22 @@ def session_status(
     The Launcher uses this endpoint after login and session restoration so product
     access is never granted from stale locally cached licence data.
     """
+    # A suspended account must still be reportable to an already-running
+    # Launcher/FAST application.  Do not perform device activation or any other
+    # entitlement mutation for it; return an authoritative denied state instead.
+    if str(user.status or "").strip().lower() != "active":
+        return {
+            "user": user_payload(user),
+            "licence": licence_payload(db, user),
+            "device_activated": False,
+            "device_message": "Account is suspended. Licensed FAST applications are unavailable.",
+            "subscription_access": {
+                "allowed": False,
+                "status": "suspended",
+                "message": "Account is suspended.",
+            },
+        }
+
     subscription_access = organisation_subscription_access(db, user.organisation_id)
     licence_data = licence_payload(db, user)
     device_activated = False
