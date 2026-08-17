@@ -146,6 +146,11 @@ def _access_role_for_licence(db: Session, user: User, licence: Licence) -> str:
     """
     if bool(user.is_admin and user.organisation_id is None):
         return "administrator"
+    # Direct organisation role is authoritative for direct organisation users.
+    # Club membership roles remain relationship metadata and must not override
+    # Analyst/Coach/Scout/Administrator product gating in the Launcher.
+    if user.organisation_id is not None:
+        return str(user.role or "analyst").strip().lower()
     if getattr(licence, "owner_type", "individual") == "club" and getattr(licence, "club_id", None):
         membership = db.scalar(select(ClubMember).where(
             ClubMember.club_id == licence.club_id,
