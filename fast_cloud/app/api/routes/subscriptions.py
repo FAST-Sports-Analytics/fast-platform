@@ -948,6 +948,42 @@ class CheckoutRequest(BaseModel):
     billing_interval: str = "monthly"
 
 
+@router.post("/checkout/preview")
+def preview_checkout_capacity(
+    payload: CheckoutRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Preview a new/resubscription checkout against retained organisation usage."""
+    organisation_id = _require_org_admin(user)
+    plan = db.get(SubscriptionPlan, payload.plan_id)
+    if not plan or not plan.active:
+        raise HTTPException(status_code=404, detail="Subscription plan not found")
+    interval = payload.billing_interval.lower().strip()
+    if interval not in {"monthly", "annual"}:
+        raise HTTPException(status_code=422, detail="Billing interval must be monthly or annual")
+    item = db.scalar(
+        select(OrganisationSubscription).where(
+            OrganisationSubscription.organisation_id == organisation_id
+        )
+    )
+    capacity = _downgrade_capacity_payload(db, organisation_id, plan, item)
+    amount = plan.monthly_price_pence if interval == "monthly" else plan.annual_price_pence
+    return {
+        "change": "checkout",
+        "effective": "now",
+        "effective_at": None,
+        "current_plan": None,
+        "target_plan": plan_payload(plan),
+        "current_billing_interval": None,
+        "target_billing_interval": interval,
+        "amount_due_now_pence": amount,
+        "next_renewal_amount_pence": amount,
+        "currency": "gbp",
+        **capacity,
+    }
+
+
 @router.post("/checkout")
 def create_checkout_session(payload: CheckoutRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
     organisation_id = _require_org_admin(user)
@@ -967,6 +1003,17 @@ def create_checkout_session(payload: CheckoutRequest, user: User = Depends(get_c
     current = db.scalar(select(OrganisationSubscription).where(OrganisationSubscription.organisation_id == organisation_id))
     if current and current.external_subscription_id and str(current.status).lower() not in {"cancelled", "expired"}:
         raise HTTPException(status_code=409, detail="This organisation already has a Stripe subscription. Use Manage subscription instead.")
+
+    capacity = _downgrade_capacity_payload(db, organisation_id, plan, current)
+    if capacity["downgrade_blocked"]:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "subscription_capacity_exceeded",
+                "message": "Choose which licensed users/devices should be released before starting this subscription.",
+                "capacity": capacity,
+            },
+        )
 
     price = _stripe_price_for_plan(plan, interval)
     customer_id = current.external_customer_id if current and current.external_customer_id else None

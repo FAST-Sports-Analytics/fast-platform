@@ -78,7 +78,7 @@ type OrganisationManagementOverview = {
 };
 
 type PlanChangePreview = {
-  change: "upgrade" | "downgrade" | "unchanged";
+  change: "upgrade" | "downgrade" | "checkout" | "unchanged";
   effective: "now" | "period_end";
   effective_at?: string | null;
   current_plan?: Plan | null;
@@ -241,13 +241,21 @@ export default function AccountPage() {
       setMessage("");
       setError("");
       try {
-        const data = await api("/api/v1/subscriptions/checkout", {
+        const preview = await api("/api/v1/subscriptions/checkout/preview", {
           method: "POST",
           body: JSON.stringify({ plan_id: plan.id, billing_interval: interval }),
         });
-        if (!data.url) throw new Error("Stripe Checkout did not return a payment URL.");
-        window.location.assign(data.url);
-        return;
+        if (preview.downgrade_blocked) {
+          setPlanPreview(preview as PlanChangePreview);
+        } else {
+          const data = await api("/api/v1/subscriptions/checkout", {
+            method: "POST",
+            body: JSON.stringify({ plan_id: plan.id, billing_interval: interval }),
+          });
+          if (!data.url) throw new Error("Stripe Checkout did not return a payment URL.");
+          window.location.assign(data.url);
+          return;
+        }
       } catch (err) {
         setError(err instanceof Error ? err.message : "FAST Cloud could not start checkout.");
       } finally {
@@ -308,7 +316,10 @@ export default function AccountPage() {
         method: "POST",
         body: JSON.stringify({ plan_id: planPreview.target_plan.id, user_ids: selectedUserIds, device_ids: selectedDeviceIds }),
       });
-      const preview = await api("/api/v1/subscriptions/change-plan/preview", {
+      const previewEndpoint = planPreview.change === "checkout"
+        ? "/api/v1/subscriptions/checkout/preview"
+        : "/api/v1/subscriptions/change-plan/preview";
+      const preview = await api(previewEndpoint, {
         method: "POST",
         body: JSON.stringify({ plan_id: planPreview.target_plan.id, billing_interval: planPreview.target_billing_interval }),
       });
@@ -317,7 +328,9 @@ export default function AccountPage() {
       setCapacityOverview(null);
       setSelectedUserIds([]);
       setSelectedDeviceIds([]);
-      setMessage(`Access changes selected. They will not take effect until the FAST ${planPreview.target_plan.name} downgrade starts.`);
+      setMessage(planPreview.change === "checkout"
+        ? `Access choices saved. They will take effect only when the new FAST ${planPreview.target_plan.name} subscription activates.`
+        : `Access changes selected. They will not take effect until the FAST ${planPreview.target_plan.name} downgrade starts.`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "FAST Cloud could not schedule your licence changes.");
     } finally {
@@ -331,6 +344,18 @@ export default function AccountPage() {
     setMessage("");
     setError("");
     try {
+      if (planPreview.change === "checkout") {
+        const data = await api("/api/v1/subscriptions/checkout", {
+          method: "POST",
+          body: JSON.stringify({
+            plan_id: planPreview.target_plan.id,
+            billing_interval: planPreview.target_billing_interval,
+          }),
+        });
+        if (!data.url) throw new Error("Stripe Checkout did not return a payment URL.");
+        window.location.assign(data.url);
+        return;
+      }
       const data = await api("/api/v1/subscriptions/change-plan", {
         method: "POST",
         body: JSON.stringify({
@@ -624,7 +649,7 @@ export default function AccountPage() {
 
         <div className="account-modal-actions">
           <button className="button button-quiet" type="button" disabled={working} onClick={() => setPlanPreview(null)}>Cancel</button>
-          <button className="button button-primary" type="button" disabled={working} onClick={planPreview.change === "downgrade" && planPreview.downgrade_blocked ? openCapacityManager : confirmPlanChange}>{
+          <button className="button button-primary" type="button" disabled={working} onClick={(planPreview.change === "downgrade" || planPreview.change === "checkout") && planPreview.downgrade_blocked ? openCapacityManager : confirmPlanChange}>{
             working
               ? "Processing…"
               : planPreview.change === "downgrade" && planPreview.downgrade_blocked
@@ -645,11 +670,11 @@ export default function AccountPage() {
         <button className="account-modal-close" type="button" disabled={working} onClick={() => setCapacityManagerOpen(false)} aria-label="Close">×</button>
         <p className="eyebrow">MANAGE DOWNGRADE LIMITS</p>
         <h2 id="capacity-manager-title">Choose access to remove</h2>
-        <p className="account-confirm-copy">FAST {planPreview.target_plan.name} includes {planPreview.target_seat_limit} licensed users and {planPreview.target_device_limit} active devices. Choose which access should end when the downgrade takes effect. Everyone keeps their current paid access until then. Accounts and local data are not deleted.</p>
+        <p className="account-confirm-copy">FAST {planPreview.target_plan.name} includes {planPreview.target_seat_limit} licensed users and {planPreview.target_device_limit} active devices. Choose which access should be released {planPreview.change === "checkout" ? "when the new subscription activates" : "when the downgrade takes effect"}. Accounts, roles, memberships and local data are not deleted.</p>
 
         {(planPreview.current_seats_used || 0) > (planPreview.target_seat_limit || 0) && <div className="account-capacity-section">
           <h3>Licensed users</h3>
-          <p>Select exactly {(planPreview.current_seats_used || 0) - (planPreview.target_seat_limit || 0)} user(s) whose licensed access will be suspended on the downgrade date. Your own administrator access cannot be selected.</p>
+          <p>Select exactly {(planPreview.current_seats_used || 0) - (planPreview.target_seat_limit || 0)} user(s) whose licensed access will be released {planPreview.change === "checkout" ? "when the new subscription activates" : "on the downgrade date"}. Your own administrator access cannot be selected.</p>
           <div className="account-capacity-list">
             {(capacityOverview.users || []).filter(item => ["active", "invited"].includes(String(item.status || "").toLowerCase())).map(item => {
               const isSelf = item.email.toLowerCase() === String(user.email || "").toLowerCase();
@@ -682,7 +707,7 @@ export default function AccountPage() {
 
         <div className="account-modal-actions">
           <button className="button button-quiet" type="button" disabled={working} onClick={() => setCapacityManagerOpen(false)}>Back</button>
-          <button className="button button-primary" type="button" disabled={working || selectedUserIds.length < Math.max(0, (planPreview.current_seats_used || 0) - (planPreview.target_seat_limit || 0)) || selectedDeviceIds.length < Math.max(0, (planPreview.current_devices_used || 0) - (planPreview.target_device_limit || 0))} onClick={applyCapacityChanges}>{working ? "Saving…" : "Schedule access changes"}</button>
+          <button className="button button-primary" type="button" disabled={working || selectedUserIds.length < Math.max(0, (planPreview.current_seats_used || 0) - (planPreview.target_seat_limit || 0)) || selectedDeviceIds.length < Math.max(0, (planPreview.current_devices_used || 0) - (planPreview.target_device_limit || 0))} onClick={applyCapacityChanges}>{working ? "Saving…" : planPreview.change === "checkout" ? "Save access choices" : "Schedule access changes"}</button>
         </div>
       </section>
     </div>}
