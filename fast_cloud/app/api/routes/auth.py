@@ -146,6 +146,11 @@ def _access_role_for_licence(db: Session, user: User, licence: Licence) -> str:
     """
     if bool(user.is_admin and user.organisation_id is None):
         return "administrator"
+    # A direct organisation account's organisation role is authoritative.
+    # Club membership roles are only used for users who do not have a direct
+    # organisation role for this organisation.
+    if user.organisation_id is not None:
+        return str(user.role or "analyst").strip().lower()
     if getattr(licence, "owner_type", "individual") == "club" and getattr(licence, "club_id", None):
         membership = db.scalar(select(ClubMember).where(
             ClubMember.club_id == licence.club_id,

@@ -50,6 +50,10 @@ def current_licence_for_user(db: Session, user: User) -> Licence | None:
 def access_role_for_licence(db: Session, user: User, licence: Licence) -> str:
     if bool(user.is_admin and user.organisation_id is None):
         return "administrator"
+    # Direct organisation users are governed by their organisation role.
+    # A club role must not silently override Analyst/Coach/etc. in Launcher.
+    if user.organisation_id is not None:
+        return str(user.role or "analyst").strip().lower()
     if getattr(licence, "owner_type", "individual") == "club" and getattr(licence, "club_id", None):
         membership = db.scalar(select(ClubMember).where(
             ClubMember.club_id == licence.club_id,
