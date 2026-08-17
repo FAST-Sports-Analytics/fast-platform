@@ -267,6 +267,45 @@ _STRIPE_PRICE_PLAN_KEYS: dict[str, tuple[str, str]] = {
 }
 
 
+# Tier direction must be determined by FAST product level, not by the raw
+# recurring price. For example Professional monthly -> Starter annual is still
+# an entitlement downgrade even though £390/year is numerically greater than
+# £89/month. Billing interval changes within the same tier are handled
+# separately: annual -> monthly waits until period end; monthly -> annual is
+# immediate and prorated by Stripe.
+_FAST_PLAN_RANK: dict[str, int] = {
+    "starter": 10,
+    "professional": 20,
+    "enterprise": 30,
+    "custom": 40,
+}
+
+
+def _is_plan_downgrade(
+    current_plan: SubscriptionPlan | None,
+    target_plan: SubscriptionPlan,
+    current_interval: str,
+    target_interval: str,
+) -> bool:
+    if current_plan is None:
+        return False
+
+    if int(current_plan.id) == int(target_plan.id):
+        return current_interval == "annual" and target_interval == "monthly"
+
+    current_key = str(current_plan.name or "").strip().lower()
+    target_key = str(target_plan.name or "").strip().lower()
+    current_rank = _FAST_PLAN_RANK.get(current_key)
+    target_rank = _FAST_PLAN_RANK.get(target_key)
+    if current_rank is not None and target_rank is not None:
+        return target_rank < current_rank
+
+    # Defensive fallback for any future catalogue tier that has not yet been
+    # assigned an explicit rank. Compare like-for-like monthly catalogue prices
+    # rather than mixing monthly and annual totals.
+    return int(target_plan.monthly_price_pence or 0) < int(current_plan.monthly_price_pence or 0)
+
+
 def _stripe_price_for_plan(plan: SubscriptionPlan, interval: str):
     plan_key = str(plan.name or "").strip().lower()
     lookup_key = _STRIPE_LOOKUP_KEYS.get((plan_key, interval))
@@ -1036,11 +1075,8 @@ def preview_subscription_plan_change(payload: ChangePlanRequest, user: User = De
         if current_plan and current_plan.id == target.id and current_interval == interval:
             return {"change": "unchanged", "effective": "now", "target_plan": plan_payload(target)}
 
-        current_amount = 0
-        if current_plan:
-            current_amount = current_plan.monthly_price_pence if current_interval == "monthly" else current_plan.annual_price_pence
         target_amount = target.monthly_price_pence if interval == "monthly" else target.annual_price_pence
-        is_downgrade = bool(current_plan and target_amount < current_amount)
+        is_downgrade = _is_plan_downgrade(current_plan, target, current_interval, interval)
         period_end = _subscription_period_end(current_sub)
         preview_now = datetime.now(timezone.utc)
         # Stripe resets the billing date when the recurring interval changes
@@ -1183,12 +1219,9 @@ def change_subscription_plan(payload: ChangePlanRequest, user: User = Depends(ge
         if current_plan and current_plan.id == target.id and _subscription_billing_interval(current_sub, item.billing_interval) == interval:
             return {"change": "unchanged", "effective": "now", "subscription": subscription_payload(db, organisation_id)}
 
-        current_amount = 0
-        if current_plan:
-            current_interval = _subscription_billing_interval(current_sub, item.billing_interval)
-            current_amount = current_plan.monthly_price_pence if current_interval == "monthly" else current_plan.annual_price_pence
+        current_interval = _subscription_billing_interval(current_sub, item.billing_interval)
         target_amount = target.monthly_price_pence if interval == "monthly" else target.annual_price_pence
-        is_downgrade = bool(current_plan and target_amount < current_amount)
+        is_downgrade = _is_plan_downgrade(current_plan, target, current_interval, interval)
         metadata = dict(_obj_get(current_sub, "metadata", {}) or {})
         metadata.update({"fast_organisation_id": str(organisation_id), "fast_plan_id": str(target.id), "fast_billing_interval": interval})
 
