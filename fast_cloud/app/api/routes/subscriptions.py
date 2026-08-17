@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import secrets
 from datetime import datetime, timedelta, timezone
@@ -26,6 +27,7 @@ except ImportError:  # Billing remains safely unavailable until dependency is in
 
 router = APIRouter(prefix="/subscriptions", tags=["subscriptions"])
 settings = get_settings()
+logger = logging.getLogger("fast.billing")
 
 # Canonical public sport entitlement catalogue. Keep these keys aligned with
 # FAST Analysis src/core/sports/sport_type.py.
@@ -1123,6 +1125,40 @@ def preview_subscription_plan_change(payload: ChangePlanRequest, user: User = De
             provider_proration_date,
         )
         lines = list(_obj_get(_obj_get(preview, "lines", {}), "data", []) or [])
+
+        # TEMPORARY TEST 9 DIAGNOSTIC:
+        # Log only billing/proration structure and amounts (no customer email,
+        # payment method, card data or other sensitive fields). This lets us see
+        # exactly what Stripe's Test Clock preview returns for Annual -> Monthly.
+        diagnostic_lines = []
+        for index, line in enumerate(lines):
+            parent = _obj_get(line, "parent", {}) or {}
+            subscription_details = _obj_get(parent, "subscription_item_details", {}) or {}
+            period = _obj_get(line, "period", {}) or {}
+            diagnostic_lines.append({
+                "index": index,
+                "amount": int(_obj_get(line, "amount", 0) or 0),
+                "description": str(_obj_get(line, "description", "") or "")[:240],
+                "legacy_proration": _obj_get(line, "proration"),
+                "parent_type": _obj_get(parent, "type"),
+                "parent_proration": _obj_get(subscription_details, "proration"),
+                "period_start": _obj_get(period, "start"),
+                "period_end": _obj_get(period, "end"),
+            })
+        logger.warning(
+            "FAST_TEST9_STRIPE_PREVIEW %s",
+            json.dumps({
+                "current_interval": current_interval,
+                "target_interval": interval,
+                "provider_proration_date": provider_proration_date,
+                "preview_amount_due": _obj_get(preview, "amount_due"),
+                "preview_subtotal": _obj_get(preview, "subtotal"),
+                "preview_total": _obj_get(preview, "total"),
+                "line_count": len(lines),
+                "lines": diagnostic_lines,
+            }, default=str, separators=(",", ":")),
+        )
+
         proration_lines = [line for line in lines if _invoice_line_is_proration(line)]
 
         # Stripe's newer preview-invoice line shape does not consistently expose
