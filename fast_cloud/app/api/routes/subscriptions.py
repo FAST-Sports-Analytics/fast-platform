@@ -83,6 +83,53 @@ def _normalise_sport(value: str) -> str:
     return str(value or "").strip().lower().replace(" ", "_")[:80]
 
 
+def _billing_contact(db: Session, item: OrganisationSubscription | None) -> tuple[str, str]:
+    if not item:
+        return "", "your organisation"
+    organisation = db.get(Organisation, item.organisation_id)
+    if not organisation:
+        return "", "your organisation"
+    email = str(organisation.contact_email or "").strip().lower()
+    if not email:
+        admin = db.scalar(
+            select(User).where(
+                User.organisation_id == organisation.id,
+                User.role == "administrator",
+                User.status.in_(["active", "invited"]),
+            ).order_by(User.id)
+        )
+        email = str(admin.email if admin else "").strip().lower()
+    return email, organisation.name
+
+
+def _send_billing_email(
+    db: Session,
+    item: OrganisationSubscription | None,
+    *,
+    subject: str,
+    heading: str,
+    intro: str,
+    detail: str,
+    action_label: str = "Manage FAST subscription",
+) -> None:
+    """Best-effort branded billing email; billing/webhooks must never fail because email did."""
+    email, organisation_name = _billing_contact(db, item)
+    if not email:
+        return
+    text_body, html_body = branded_action_email(
+        heading=heading,
+        intro=intro,
+        action_label=action_label,
+        action_url=f"{settings.public_app_url.rstrip('/')}/account",
+        expiry_text=detail,
+        footer_text=f"This message relates to the FAST subscription for {organisation_name}.",
+    )
+    try:
+        send_email(to_email=email, subject=subject, text=text_body, html=html_body)
+    except EmailDeliveryError:
+        return
+
+
 def _send_checkout_invitation(db: Session, user: User, organisation: Organisation) -> None:
     token = secrets.token_urlsafe(40)
     user.invitation_token_hash = _hash_one_time_token(token)
@@ -1459,6 +1506,14 @@ def change_subscription_plan(payload: ChangePlanRequest, user: User = Depends(ge
             )
             db.add(AuditLog(admin_user_id=user.id, action="subscription_downgrade_scheduled", category="billing", target_type="organisation", target_id=organisation_id, target_label=str(organisation_id), details=f"Scheduled {target.name} ({interval}) for next renewal."))
             db.commit()
+            _send_billing_email(
+                db, item,
+                subject=f"FAST {target.name} change scheduled",
+                heading="FAST plan change scheduled",
+                intro=f"Your organisation is scheduled to move to FAST {target.name} ({interval}) at the end of the current paid period.",
+                detail=f"The change is scheduled for {period_end.strftime('%d %B %Y')}. Your current paid access remains unchanged until then.",
+                action_label="Review plan change",
+            )
             return {"change": "downgrade", "effective": "period_end", "effective_at": period_end.isoformat(), "target_plan": plan_payload(target), "subscription": subscription_payload(db, organisation_id)}
 
         update_params = {
@@ -1516,6 +1571,13 @@ def change_subscription_plan(payload: ChangePlanRequest, user: User = Depends(ge
         _sync_stripe_subscription(db, refreshed, organisation_id_override=organisation_id)
         db.add(AuditLog(admin_user_id=user.id, action="subscription_upgraded", category="billing", target_type="organisation", target_id=organisation_id, target_label=str(organisation_id), details=f"Changed to {target.name} ({interval})."))
         db.commit()
+        _send_billing_email(
+            db, item,
+            subject=f"Your FAST subscription is now {target.name}",
+            heading=f"FAST {target.name} is active",
+            intro=f"Your organisation has successfully changed to FAST {target.name} ({interval}).",
+            detail="The new plan and its licensed-user, device and product allowances are now active. Stripe has applied any billing adjustment for the change.",
+        )
         return {"change": "upgrade", "effective": "now", "target_plan": plan_payload(target), "subscription": subscription_payload(db, organisation_id)}
     except HTTPException:
         raise
@@ -1629,6 +1691,14 @@ def cancel_subscription_at_period_end(user: User = Depends(get_current_user), db
             item.cancel_at_period_end = True
         db.add(AuditLog(admin_user_id=user.id, action="subscription_cancellation_scheduled", category="billing", target_type="organisation", target_id=organisation_id, target_label=str(organisation_id), details="Subscription cancellation scheduled for the end of the current paid period."))
         db.commit()
+        _send_billing_email(
+            db, item,
+            subject="Your FAST subscription is scheduled to end",
+            heading="FAST cancellation scheduled",
+            intro="Your FAST subscription has been scheduled to cancel at the end of the current paid period.",
+            detail=f"Your FAST access remains available until {item.current_period_ends_at.strftime('%d %B %Y') if item.current_period_ends_at else 'the end of the current paid period'}. You can keep the subscription from your FAST account before it ends.",
+            action_label="Review subscription",
+        )
         return {"cancelled_at_period_end": True, "message": "Cancellation scheduled. Your FAST access will continue until the end of your current paid period.", "subscription": subscription_payload(db, organisation_id)}
     except HTTPException:
         raise
@@ -1669,6 +1739,13 @@ def undo_subscription_cancellation(user: User = Depends(get_current_user), db: S
             item.cancel_at_period_end = False
         db.add(AuditLog(admin_user_id=user.id, action="subscription_cancellation_reversed", category="billing", target_type="organisation", target_id=organisation_id, target_label=str(organisation_id), details="Scheduled subscription cancellation removed; current subscription will renew normally."))
         db.commit()
+        _send_billing_email(
+            db, item,
+            subject="Your FAST subscription will continue",
+            heading="FAST cancellation removed",
+            intro="The scheduled cancellation has been removed and your FAST subscription will continue.",
+            detail=f"Your subscription will renew normally on {item.current_period_ends_at.strftime('%d %B %Y') if item.current_period_ends_at else 'its next renewal date'}.",
+        )
         return {"cancellation_removed": True, "message": "Cancellation removed. Your FAST subscription will continue and renew normally.", "subscription": subscription_payload(db, organisation_id)}
     except HTTPException:
         raise
@@ -2408,6 +2485,14 @@ async def stripe_webhook(request: Request) -> dict:
                         if terminal_org:
                             _revoke_subscription_entitlements(db, terminal_org, ended_at=terminal_end)
                         details = "Stripe subscription deleted; FAST paid access and licence entitlements revoked."
+                        _send_billing_email(
+                            db, matched_item,
+                            subject="Your FAST subscription has ended",
+                            heading="FAST subscription ended",
+                            intro="Your organisation's paid FAST subscription has ended and licensed product access is no longer active.",
+                            detail="Your organisation account and user records are retained. You can start a new FAST subscription from your account whenever you are ready.",
+                            action_label="View FAST plans",
+                        )
                     else:
                         details = (
                             f"Subscription state synchronised to {matched_item.status}; "
@@ -2428,6 +2513,14 @@ async def stripe_webhook(request: Request) -> dict:
                         f"Payment failure applied; FAST access remains available during grace until "
                         f"{matched_item.grace_ends_at.isoformat() if matched_item.grace_ends_at else 'not set'}."
                     )
+                    _send_billing_email(
+                        db, matched_item,
+                        subject="Action required: FAST payment failed",
+                        heading="We couldn't collect your FAST payment",
+                        intro="Stripe could not collect the latest payment for your FAST subscription.",
+                        detail=f"FAST access remains available during the payment grace period until {matched_item.grace_ends_at.strftime('%d %B %Y') if matched_item.grace_ends_at else 'the grace period ends'}. Update your payment method to avoid losing access.",
+                        action_label="Fix payment",
+                    )
                 else:
                     processing_status = "unmatched"
                     details = (
@@ -2440,6 +2533,13 @@ async def stripe_webhook(request: Request) -> dict:
                 matched_item = _apply_payment_recovery(db, data)
                 if matched_item:
                     details = "Invoice paid; FAST subscription restored to active and grace cleared."
+                    _send_billing_email(
+                        db, matched_item,
+                        subject="FAST payment received",
+                        heading="Your FAST payment was successful",
+                        intro="The outstanding payment has been received and your FAST subscription is active.",
+                        detail="Any payment grace state has been cleared. Your organisation can continue using its licensed FAST products normally.",
+                    )
                 else:
                     processing_status = "unmatched"
                     details = "Paid invoice received but no FAST subscription matched the Stripe references."

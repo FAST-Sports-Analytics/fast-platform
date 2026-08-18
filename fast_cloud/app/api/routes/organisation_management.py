@@ -24,6 +24,29 @@ router = APIRouter(prefix="/organisation-management", tags=["organisation-manage
 settings = get_settings()
 
 
+def _send_access_email(
+    target: User,
+    organisation: Organisation,
+    *,
+    subject: str,
+    heading: str,
+    intro: str,
+    detail: str,
+) -> None:
+    text_body, html_body = branded_action_email(
+        heading=heading,
+        intro=intro,
+        action_label="Open FAST account",
+        action_url=f"{settings.public_app_url.rstrip('/')}/account",
+        expiry_text=detail,
+        footer_text=f"This access change was made for {organisation.name}. Contact your organisation administrator if you believe it was made in error.",
+    )
+    try:
+        send_email(to_email=target.email, subject=subject, text=text_body, html=html_body)
+    except EmailDeliveryError:
+        return
+
+
 class CreateUserRequest(BaseModel):
     full_name: str = Field(min_length=1, max_length=160)
     email: str = Field(min_length=3, max_length=320)
@@ -379,6 +402,7 @@ def update_user(user_id: int, payload: UpdateUserRequest, user: User = Depends(g
     if not target or target.organisation_id != organisation_id:
         raise HTTPException(status_code=404, detail="Organisation user not found")
     previous_role = str(target.role or "analyst").lower().strip()
+    previous_status = str(target.status or "").lower().strip()
     previous_products = _loads(target.products_json, [])
     role = payload.role.lower().strip()
     if role not in {"administrator", "analyst", "coach", "scout"}:
@@ -428,6 +452,22 @@ def update_user(user_id: int, payload: UpdateUserRequest, user: User = Depends(g
         "; ".join(change_notes) + ".",
     )
     db.commit()
+    if previous_status != status and status == "suspended":
+        _send_access_email(
+            target, organisation,
+            subject=f"Your {organisation.name} FAST access has been suspended",
+            heading="FAST access suspended",
+            intro=f"Your FAST access for {organisation.name} has been suspended by an organisation administrator.",
+            detail="Your account has not been deleted. Licensed FAST applications will close automatically and remain unavailable until an administrator restores your access.",
+        )
+    elif previous_status != status and status == "active":
+        _send_access_email(
+            target, organisation,
+            subject=f"Your {organisation.name} FAST access has been restored",
+            heading="FAST access restored",
+            intro=f"Your FAST organisation access for {organisation.name} is active again.",
+            detail="Your available FAST applications depend on your assigned role, products and the organisation's active subscription.",
+        )
     return _overview(db, organisation_id)
 
 
@@ -457,6 +497,15 @@ def remove_user(user_id: int, user: User = Depends(get_current_user), db: Sessio
         "User removed from organisation access and seat allocation reclaimed.",
     )
     db.commit()
+    organisation = db.get(Organisation, organisation_id)
+    if organisation:
+        _send_access_email(
+            target, organisation,
+            subject=f"Your {organisation.name} FAST licensed access was removed",
+            heading="FAST licensed access removed",
+            intro=f"Your licensed FAST access for {organisation.name} has been removed by an organisation administrator.",
+            detail="Your FAST account record is retained, but you no longer consume one of the organisation's licensed-user allocations and cannot launch licensed products unless access is assigned again.",
+        )
     return _overview(db, organisation_id)
 
 
