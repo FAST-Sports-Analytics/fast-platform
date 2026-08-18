@@ -13,6 +13,6 @@ export default function VerifyEmail(){
       .catch(e=>{setState("error");setMessage(e instanceof Error?e.message:"Verification failed.");});
   },[]);
   return <main className="auth-page"><Link href="/" className="auth-brand"><Image src="/branding/fast-logo.png" alt="FAST Sports Analytics" width={420} height={142}/></Link>
-    <section className="auth-card"><p className="eyebrow">Account verification</p><h1>{state==="ok"?"You're verified.":state==="error"?"Verification problem":"One moment…"}</h1><p>{message}</p>{state==="ok"&&<Link className="button button-primary" href="/login">Sign in to FAST</Link>}{state==="error"&&<Link href="/contact">Contact FAST support →</Link>}</section>
+    <section className="auth-card"><p className="eyebrow">Account verification</p><h1>{state==="ok"?"You're verified.":state==="error"?"Verification problem":"One moment…"}</h1><p>{message}</p>{state==="ok"&&<Link className="button button-primary" href="/login" style={{ color: "#04150d" }}>Sign in to FAST</Link>}{state==="error"&&<Link href="/contact">Contact FAST support →</Link>}</section>
   </main>;
 }

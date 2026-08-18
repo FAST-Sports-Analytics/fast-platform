@@ -45,7 +45,7 @@ export default function Signup() {
       {complete ? <>
         <h1>Check your email.</h1>
         <p>We've sent a verification link to <strong>{form.email}</strong>. Verify your address, then sign in to choose your FAST plan.</p>
-        <Link className="button button-primary" href="/login">Go to sign in</Link>
+        <Link className="button button-primary" href="/login" style={{ color: "#04150d" }}>Go to sign in</Link>
       </> : <>
         <h1>Create your FAST account.</h1>
         <p>Create the administrator account for your organisation. You'll choose and pay for your FAST plan after email verification.</p>
