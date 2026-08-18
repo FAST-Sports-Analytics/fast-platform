@@ -323,6 +323,12 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)) -> TokenResponse
     )
 
 
+@router.get("/me")
+def current_user_profile(user: User = Depends(get_current_user)) -> dict:
+    """Return the current authoritative FAST user profile."""
+    return user_payload(user)
+
+
 @router.post("/change-password")
 def change_password(payload: ChangePasswordRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
     if not verify_password(payload.current_password, user.password_hash):

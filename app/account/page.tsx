@@ -171,7 +171,8 @@ export default function AccountPage() {
     try {
       const stored = JSON.parse(window.sessionStorage.getItem("fast_user") || "{}");
       setUser(stored);
-      const [current, catalogue] = await Promise.all([
+      const [profile, current, catalogue] = await Promise.all([
+        api("/api/v1/auth/me"),
         api("/api/v1/subscriptions/current"),
         fetch(`${apiBase()}/api/v1/subscriptions/public-plans`, { headers: { Accept: "application/json" } }).then(async response => {
           const data = await response.json().catch(() => ({}));
@@ -179,6 +180,8 @@ export default function AccountPage() {
           return data;
         }),
       ]);
+      setUser(profile || stored);
+      window.sessionStorage.setItem("fast_user", JSON.stringify(profile || stored));
       setSubscription(current.subscription || null);
       setPlans((catalogue.plans || []).filter((plan: Plan) => plan.self_service_upgrades !== false && ["starter", "professional"].includes(plan.name.toLowerCase())));
       setBillingMode(catalogue.billing_mode || "");
