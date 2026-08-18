@@ -65,3 +65,5 @@
 .button-danger{border-color:rgba(255,100,100,.45);background:rgba(145,35,35,.16);color:#ffd2d2}.button-danger:hover:not(:disabled){border-color:rgba(255,100,100,.75);background:rgba(175,45,45,.24);color:#fff}.account-cancellation-notice{border-color:rgba(255,170,70,.35);background:rgba(255,170,70,.055)}
 
 .auth-card-wide{width:min(620px,100%)}.auth-form small{color:#758084}.auth-check{display:flex;grid-template-columns:20px 1fr;align-items:start;gap:10px}.auth-check input{width:18px;height:18px;margin-top:2px;accent-color:var(--green)}.auth-check a{color:var(--green)}
+
+.auth-card>a.button-primary{color:var(--ink)}
