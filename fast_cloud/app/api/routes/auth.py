@@ -249,6 +249,10 @@ def register(payload: RegisterRequest, request: Request, db: Session = Depends(g
         sports_json="[]",
     )
     db.add(user)
+    # Allocate the new administrator's primary key before writing the audit
+    # entry. audit_logs.admin_user_id is NOT NULL, so using user.id before
+    # the ORM has flushed the INSERT leaves it as None and aborts registration.
+    db.flush()
     db.add(AuditLog(
         admin_user_id=user.id,
         action="public_account_registered",
