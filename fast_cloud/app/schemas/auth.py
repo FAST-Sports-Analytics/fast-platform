@@ -4,7 +4,10 @@ from pydantic import BaseModel, EmailStr, Field
 class RegisterRequest(BaseModel):
     email: EmailStr
     password: str = Field(min_length=10, max_length=128)
-    full_name: str | None = Field(default=None, max_length=160)
+    full_name: str = Field(min_length=2, max_length=160)
+    organisation_name: str = Field(min_length=2, max_length=180)
+    country: str | None = Field(default=None, max_length=100)
+    accept_terms: bool = False
 
 
 class LoginRequest(BaseModel):

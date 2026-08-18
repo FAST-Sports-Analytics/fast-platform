@@ -23,7 +23,7 @@ from app.core.security import (
 from app.api.deps import get_authenticated_user, get_current_user
 from app.api.routes.subscriptions import subscription_payload
 from app.db.session import get_db
-from app.models import AuditLog, Club, ClubMember, DeviceActivation, DeviceAuditLog, Licence, User
+from app.models import AuditLog, Club, ClubMember, DeviceActivation, DeviceAuditLog, Licence, Organisation, User
 from app.schemas.auth import (
     LoginRequest,
     RefreshRequest,
@@ -206,22 +206,81 @@ def licence_payload(db: Session, user: User) -> dict | None:
 
 
 @router.post("/register", status_code=status.HTTP_201_CREATED)
-def register(payload: RegisterRequest, db: Session = Depends(get_db)) -> dict:
+def register(payload: RegisterRequest, request: Request, db: Session = Depends(get_db)) -> dict:
+    limiter.enforce(
+        f"public-register:{client_address(request)}",
+        RateLimit(settings.token_submit_rate_attempts, settings.token_submit_rate_window_seconds),
+    )
+    if not payload.accept_terms:
+        raise HTTPException(status_code=422, detail="You must accept the FAST Terms and Privacy Policy")
     email = payload.email.lower().strip()
-    if db.scalar(select(User).where(User.email == email)):
+    organisation_name = payload.organisation_name.strip()
+    full_name = payload.full_name.strip()
+    if db.scalar(select(User).where(func.lower(User.email) == email)):
         raise HTTPException(status_code=409, detail="An account already exists for this email")
+    if db.scalar(select(Organisation).where(func.lower(Organisation.name) == organisation_name.lower())):
+        raise HTTPException(status_code=409, detail="An organisation with this name already exists")
+
+    organisation = Organisation(
+        name=organisation_name,
+        contact_name=full_name,
+        contact_email=email,
+        country=(payload.country or "").strip() or None,
+        subscription_tier="No active subscription",
+        sports_json="[]",
+        max_seats=0,
+        status="active",
+    )
+    db.add(organisation)
+    db.flush()
+
     token = secrets.token_urlsafe(32)
     user = User(
         email=email,
         password_hash=hash_password(payload.password),
-        full_name=payload.full_name,
+        full_name=full_name,
+        email_verified=False,
+        status="active",
+        is_admin=False,
+        organisation_id=organisation.id,
+        role="administrator",
         verification_token=token,
+        products_json="[]",
+        sports_json="[]",
     )
     db.add(user)
+    db.add(AuditLog(
+        admin_user_id=user.id,
+        action="public_account_registered",
+        category="account_onboarding",
+        target_type="organisation",
+        target_id=organisation.id,
+        target_label=organisation.name,
+        details="Public organisation administrator account created; email verification required before sign-in.",
+    ))
     db.commit()
     db.refresh(user)
+
+    verify_url = f"{settings.public_app_url.rstrip('/')}/verify-email?token={token}"
+    text_body, html_body = branded_action_email(
+        heading="Verify your FAST account",
+        intro=f"Welcome to FAST Sports Analytics. Verify your email address to activate the administrator account for {organisation.name}.",
+        action_label="Verify email",
+        action_url=verify_url,
+        expiry_text="This verification link is for your new FAST account.",
+        footer_text="After verification, sign in to choose your FAST plan and complete secure payment.",
+    )
+    try:
+        send_email(to_email=email, subject="Verify your FAST Sports Analytics account", text=text_body, html=html_body)
+    except EmailDeliveryError as exc:
+        # Do not leave an unusable public account behind if production email delivery fails.
+        db.delete(user)
+        db.delete(organisation)
+        db.commit()
+        raise HTTPException(status_code=503, detail="FAST could not send the verification email. Please try again.") from exc
+
     response = {
-        "message": "Account created. Verify the email before production access is enabled.",
+        "message": "Account created. Check your email to verify your FAST account.",
         "user": user_payload(user),
     }
     if settings.environment.lower() != "production":
@@ -247,6 +306,8 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)) -> TokenResponse
         raise HTTPException(status_code=401, detail="Incorrect email or password")
     if user.status != "active":
         raise HTTPException(status_code=403, detail="Account is suspended")
+    if not user.email_verified:
+        raise HTTPException(status_code=403, detail="Verify your email address before signing in")
     user.last_login_at = datetime.now(timezone.utc)
     db.add(AuditLog(admin_user_id=user.id, action="login", category="user_activity", target_type="user", target_id=user.id, target_label=user.email, details=f"Launcher login as {('platform administrator' if (user.is_admin and user.organisation_id is None) else user.role or 'analyst')}"))
     db.commit()

@@ -59,7 +59,7 @@ export default function Login() {
         <button className="button button-primary" type="submit" disabled={submitting}>{submitting ? "Signing in…" : "Log in"}</button>
       </form>
       <small>Organisation administrators can manage their FAST plan and billing here. Product access remains controlled by your organisation licence.</small>
-      <Link href="/reset-password">Forgot your password? →</Link>
+      <Link href="/reset-password">Forgot your password? →</Link><small>New to FAST? <Link href="/signup">Create an account</Link>.</small>
     </section>
     <Link className="back-link" href="/">← Back to website</Link>
   </main>;
