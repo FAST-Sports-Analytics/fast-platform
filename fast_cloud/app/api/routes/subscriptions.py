@@ -613,6 +613,10 @@ def subscription_payload(db: Session, organisation_id: int, *, refresh_provider:
     seats_used = allocated_user_count(db, organisation_id)
     seat_over_by = max(0, seats_used - int(seat_limit or 0)) if seat_limit else 0
 
+    # Keep the customer subscription summary on the same authoritative device
+    # inventory used by organisation management and capacity enforcement.
+    active_devices = _organisation_active_device_count(db, organisation_id)
+
     return {
         "id": item.id,
         "status": item.status,
@@ -637,6 +641,7 @@ def subscription_payload(db: Session, organisation_id: int, *, refresh_provider:
         "seat_over_limit": bool(seat_over_by),
         "seat_over_by": seat_over_by,
         "device_limit": device_limit,
+        "active_devices": active_devices,
         "plan": effective_plan,
     }
 
