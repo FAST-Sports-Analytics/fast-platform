@@ -37,6 +37,7 @@ type Subscription = {
   seat_limit?: number | null;
   seats_used?: number;
   device_limit?: number | null;
+  active_devices?: number;
   plan?: Plan | null;
   scheduled_plan_change?: {
     type: "downgrade" | "billing_interval";
@@ -509,8 +510,8 @@ export default function AccountPage() {
           <div className="account-panel-heading"><div><p className="eyebrow">{subscription?.plan ? "Current subscription" : "Subscription"}</p><h2>{subscription?.plan ? `FAST ${subscription.plan.name}` : "No active FAST subscription"}</h2></div>{subscription?.plan && <strong className="account-price">{currentPrice}</strong>}</div>
           {subscription?.plan ? <>
             <div className="account-metrics">
-              <article><small>Users</small><strong>{subscription?.seats_used ?? 0} / {subscription?.seat_limit ?? "—"}</strong></article>
-              <article><small>Devices</small><strong>{subscription?.device_limit ?? "—"}</strong></article>
+              <article><small>Licensed users</small><strong>{subscription?.seats_used ?? 0} / {subscription?.seat_limit ?? "—"}</strong></article>
+              <article><small>Active devices</small><strong>{subscription?.active_devices ?? 0} / {subscription?.device_limit ?? "—"}</strong></article>
               <article><small>{subscription?.period_label || "Renewal"}</small><strong>{dateLabel(subscription?.period_value)}</strong></article>
               <article><small>Billing</small><strong>{subscription?.billing_interval ? subscription.billing_interval[0].toUpperCase() + subscription.billing_interval.slice(1) : "—"}</strong></article>
             </div>
@@ -524,7 +525,7 @@ export default function AccountPage() {
         </section>
 
         <section className="account-panel">
-          <div className="account-panel-heading"><div><p className="eyebrow">Change plan</p><h2>Choose the FAST plan that fits your organisation.</h2></div><small>{billingMode === "test" ? "Stripe sandbox" : "Secure Stripe billing"}</small></div>
+          <div className="account-panel-heading"><div><p className="eyebrow">{subscription?.plan ? "Plans & billing" : "Choose a plan"}</p><h2>{subscription?.plan ? "Change your FAST subscription" : "Start your FAST subscription"}</h2></div><small>{billingMode === "test" ? "Test billing environment" : "Payments secured by Stripe"}</small></div>
           <div className="account-plan-grid">
             {plans.map(plan => {
               const current = currentPlanId === plan.id;
@@ -534,7 +535,7 @@ export default function AccountPage() {
                 <strong>{money(plan.monthly_price_pence)}/month</strong>
                 <small>{money(plan.annual_price_pence)}/year</small>
                 <ul>
-                  <li>{plan.included_seats} included seats</li>
+                  <li>{plan.included_seats} licensed users</li>
                   <li>{plan.max_devices} devices</li>
                   <li>{plan.products.map(value => `FAST ${value[0].toUpperCase()}${value.slice(1)}`).join(" + ")}</li>
                   <li>{plan.cloud_storage_gb} GB cloud storage</li>
@@ -546,7 +547,7 @@ export default function AccountPage() {
               </article>;
             })}
           </div>
-          <p className="account-note">Upgrades apply immediately and Stripe handles proration. Downgrades are scheduled for the end of your current paid period so you keep the access you have already paid for.</p>
+          <p className="account-note">{subscription?.plan ? "Upgrades apply immediately and Stripe calculates any billing adjustment. Downgrades take effect at the end of your current paid period, so you keep the access you have already paid for." : "Your subscription starts after successful payment. Existing organisation accounts are retained, and FAST will ask you to reconcile users or devices first if the selected plan has lower limits."}</p>
         </section>
       </>}
     </div>
@@ -699,7 +700,7 @@ export default function AccountPage() {
 
         {(planPreview.current_devices_used || 0) > (planPreview.target_device_limit || 0) && <div className="account-capacity-section">
           <h3>Active devices</h3>
-          <p>Select exactly {(planPreview.current_devices_used || 0) - (planPreview.target_device_limit || 0)} device(s) to deactivate on the downgrade date.</p>
+          <p>Select exactly {(planPreview.current_devices_used || 0) - (planPreview.target_device_limit || 0)} device(s) to deactivate {planPreview.change === "checkout" ? "when the new subscription activates" : "on the downgrade date"}.</p>
           <div className="account-capacity-list">
             {(capacityOverview.devices || []).filter(item => item.active).map(item => {
               const checked = selectedDeviceIds.includes(item.id);
