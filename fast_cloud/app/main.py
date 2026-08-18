@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 
-from app.api.routes import admin_releases, admin_summary, auth, diagnostics, licences, organisation_management, subscriptions, updates, users
+from app.api.routes import admin_releases, admin_summary, auth, customer_downloads, diagnostics, licences, organisation_management, subscriptions, updates, users
 from app.admin_portal import router as admin_portal_router
 from app.releases import router as releases_router
 from app.core.config import get_settings
@@ -99,6 +99,7 @@ app.include_router(updates.router, prefix="/api/v1")
 app.include_router(diagnostics.router, prefix="/api/v1")
 app.include_router(organisation_management.router, prefix="/api/v1")
 app.include_router(subscriptions.router, prefix="/api/v1")
+app.include_router(customer_downloads.router)
 app.include_router(releases_router)
 app.include_router(admin_portal_router)
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
