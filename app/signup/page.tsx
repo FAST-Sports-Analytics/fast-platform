@@ -4,10 +4,6 @@ import Image from "next/image";
 import Link from "next/link";
 import { FormEvent, useState } from "react";
 
-function apiBase() {
-  return (process.env.NEXT_PUBLIC_FAST_CLOUD_URL || "http://127.0.0.1:8766").replace(/\/+$/, "");
-}
-
 export default function Signup() {
   const [form, setForm] = useState({ full_name: "", email: "", organisation_name: "", country: "United Kingdom", password: "", confirm: "", accept_terms: false });
   const [submitting, setSubmitting] = useState(false);
@@ -21,7 +17,7 @@ export default function Signup() {
     if (form.password !== form.confirm) return setMessage("Passwords do not match.");
     setSubmitting(true);
     try {
-      const response = await fetch(`${apiBase()}/api/v1/auth/register`, {
+      const response = await fetch("/api/onboarding/register", {
         method: "POST",
         headers: { "Content-Type": "application/json", Accept: "application/json" },
         body: JSON.stringify({
@@ -30,7 +26,12 @@ export default function Signup() {
         }),
       });
       const data = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(typeof data.detail === "string" ? data.detail : "FAST could not create your account.");
+      if (!response.ok) {
+        const detail = typeof data.detail === "string"
+          ? data.detail
+          : "FAST could not create your account.";
+        throw new Error(detail);
+      }
       setComplete(true);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "FAST could not create your account.");

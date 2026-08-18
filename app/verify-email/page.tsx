@@ -3,13 +3,12 @@ import Image from "next/image";
 import Link from "next/link";
 import { useEffect, useState } from "react";
 
-function apiBase(){return (process.env.NEXT_PUBLIC_FAST_CLOUD_URL || "http://127.0.0.1:8766").replace(/\/+$/, "");}
 export default function VerifyEmail(){
   const [state,setState]=useState<"working"|"ok"|"error">("working");
   const [message,setMessage]=useState("Verifying your email address…");
   useEffect(()=>{ const token=new URLSearchParams(window.location.search).get("token")||"";
     if(!token){setState("error");setMessage("This verification link is invalid.");return;}
-    fetch(`${apiBase()}/api/v1/auth/verify-email`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({token})})
+    fetch("/api/onboarding/verify-email",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({token})})
       .then(async r=>{const d=await r.json().catch(()=>({})); if(!r.ok) throw new Error(d.detail||"Verification failed."); setState("ok");setMessage("Your email is verified. You can now sign in and choose your FAST plan.");})
       .catch(e=>{setState("error");setMessage(e instanceof Error?e.message:"Verification failed.");});
   },[]);
