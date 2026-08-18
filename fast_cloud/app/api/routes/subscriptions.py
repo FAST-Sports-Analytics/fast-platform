@@ -655,7 +655,7 @@ def _downgrade_capacity_payload(
             f"FAST {target.name} includes {seat_limit} licensed user"
             f"{'s' if seat_limit != 1 else ''}, but your organisation currently uses {seats_used}. "
             f"Remove or deactivate {remove_count} licensed user"
-            f"{'s' if remove_count != 1 else ''} before scheduling this downgrade."
+            f"{'s' if remove_count != 1 else ''} before continuing."
         )
     if effective_devices_used > device_limit:
         remove_count = effective_devices_used - device_limit
@@ -663,7 +663,7 @@ def _downgrade_capacity_payload(
             f"FAST {target.name} allows {device_limit} active device"
             f"{'s' if device_limit != 1 else ''}, but your organisation currently uses {devices_used}. "
             f"Deactivate {remove_count} device"
-            f"{'s' if remove_count != 1 else ''} before scheduling this downgrade."
+            f"{'s' if remove_count != 1 else ''} before continuing."
         )
 
     return {
@@ -1298,8 +1298,21 @@ def stage_downgrade_access(payload: DowngradeAccessSelectionRequest, user: User 
     item.pending_downgrade_plan_id = target.id
     item.pending_downgrade_user_ids_json = json.dumps(user_ids)
     item.pending_downgrade_device_ids_json = json.dumps(device_ids)
-    item.pending_downgrade_effective_at = item.current_period_ends_at
-    db.add(AuditLog(admin_user_id=user.id, action="subscription_downgrade_access_staged", category="billing", target_type="organisation", target_id=organisation_id, target_label=str(organisation_id), details=f"Scheduled {len(user_ids)} user suspension(s) and {len(device_ids)} device deactivation(s) for FAST {target.name} downgrade."))
+    terminal_checkout = str(item.status or "").lower() in {"cancelled", "expired"}
+    item.pending_downgrade_effective_at = None if terminal_checkout else item.current_period_ends_at
+    db.add(AuditLog(
+        admin_user_id=user.id,
+        action="subscription_checkout_access_staged" if terminal_checkout else "subscription_downgrade_access_staged",
+        category="billing",
+        target_type="organisation",
+        target_id=organisation_id,
+        target_label=str(organisation_id),
+        details=(
+            f"Selected {len(user_ids)} user licence release(s) and {len(device_ids)} device deactivation(s) for new FAST {target.name} subscription activation."
+            if terminal_checkout
+            else f"Scheduled {len(user_ids)} user suspension(s) and {len(device_ids)} device deactivation(s) for FAST {target.name} downgrade."
+        ),
+    ))
     db.commit()
     return {"staged": True, "effective_at": item.pending_downgrade_effective_at.isoformat() if item.pending_downgrade_effective_at else None, "capacity": _downgrade_capacity_payload(db, organisation_id, target, item)}
 
@@ -2215,6 +2228,8 @@ def _sync_stripe_subscription(
         item = OrganisationSubscription(organisation_id=organisation.id)
         db.add(item)
     previous_plan_id = item.plan_id
+    previous_external_subscription_id = str(item.external_subscription_id or "")
+    previous_status = str(item.status or "").lower()
     # The live Stripe price is authoritative for tier changes. Dashboard
     # changes do not rewrite checkout metadata, so relying on fast_plan_id would
     # leave a downgraded Starter subscription provisioned as Professional.
@@ -2278,7 +2293,14 @@ def _sync_stripe_subscription(
             )
         # Apply any access reductions chosen when a period-end downgrade was
         # scheduled. Paid access remains unchanged until Stripe switches plans.
-        if item.pending_downgrade_plan_id == effective_plan.id and previous_plan_id != effective_plan.id:
+        current_external_subscription_id = str(_obj_get(subscription, "id", "") or "")
+        is_new_subscription = bool(
+            current_external_subscription_id
+            and current_external_subscription_id != previous_external_subscription_id
+        )
+        terminal_resubscription = previous_status in {"cancelled", "expired"} and is_new_subscription
+        plan_switched = previous_plan_id != effective_plan.id
+        if item.pending_downgrade_plan_id == effective_plan.id and (plan_switched or terminal_resubscription):
             try:
                 pending_user_ids = [int(value) for value in json.loads(item.pending_downgrade_user_ids_json or "[]")]
             except (TypeError, ValueError, json.JSONDecodeError):
