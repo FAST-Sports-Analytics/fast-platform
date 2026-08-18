@@ -522,6 +522,7 @@ export default function AccountPage() {
           </> : <p>Your paid FAST access has ended. Choose a plan below to restore licensed applications and organisation entitlements.</p>}
           <div className="account-actions">
             <Link className="button button-primary" href="/downloads">Downloads</Link>
+            <Link className="button button-quiet" href="/organisation">Organisation Management</Link>
             <button className="button button-quiet" type="button" disabled={working || !subscription?.can_manage_billing} onClick={manageBilling}>Manage payment & invoices</button>
             {subscription?.plan && !subscription?.cancel_at_period_end && <button className="button button-danger" type="button" disabled={working || !subscription?.can_manage_billing || Boolean(subscription?.scheduled_plan_change)} onClick={() => setCancelSubscriptionOpen(true)}>Cancel subscription</button>}
             {subscription?.plan && subscription?.cancel_at_period_end && <button className="button button-primary" type="button" disabled={working} onClick={undoCancellation}>{working ? "Processing…" : "Keep subscription"}</button>}
