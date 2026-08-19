@@ -617,13 +617,19 @@ export default function AccountPage() {
     </div>
 
     {pendingCheckout && <div className="account-modal-backdrop" role="presentation" onMouseDown={() => !working && setPendingCheckout(null)}>
-      <section className="account-modal" role="dialog" aria-modal="true" aria-labelledby="checkout-sports-title" onMouseDown={event => event.stopPropagation()}>
+      <section className="account-modal account-sport-modal" role="dialog" aria-modal="true" aria-labelledby="checkout-sports-title" onMouseDown={event => event.stopPropagation()}>
         <button className="account-modal-close" type="button" aria-label="Close" disabled={working} onClick={() => setPendingCheckout(null)}>×</button>
-        <p className="eyebrow">Licensed sports</p>
-        <h2 id="checkout-sports-title">Choose your FAST {pendingCheckout.plan.name} sport{pendingCheckout.plan.name.toLowerCase() === "starter" ? "" : "s"}</h2>
-        <p className="account-confirm-copy">{pendingCheckout.plan.name.toLowerCase() === "starter"
-          ? "Starter includes exactly one licensed sport. Choose which of the 14 FAST sports this organisation will use."
-          : "Professional includes between one and five licensed sports. Choose the sports this organisation will use."}</p>
+        <div className="account-sport-heading">
+          <p className="eyebrow">Licensed sports</p>
+          <h2 id="checkout-sports-title">Choose your FAST {pendingCheckout.plan.name} sport{pendingCheckout.plan.name.toLowerCase() === "starter" ? "" : "s"}</h2>
+          <p className="account-confirm-copy">{pendingCheckout.plan.name.toLowerCase() === "starter"
+            ? "Select the one sport your organisation will use with FAST Starter."
+            : "Select up to five sports your organisation will use with FAST Professional."}</p>
+        </div>
+        <div className="account-sport-selection-bar">
+          <span>{pendingCheckout.plan.name}</span>
+          <strong>{selectedSports.length} / {pendingCheckout.plan.name.toLowerCase() === "starter" ? 1 : 5} selected</strong>
+        </div>
         <div className="checkout-sport-grid">
           {supportedSports.map(sport => {
             const maxSports = pendingCheckout.plan.name.toLowerCase() === "starter" ? 1 : 5;
@@ -635,10 +641,14 @@ export default function AccountPage() {
             </label>;
           })}
         </div>
-        <p className="account-confirm-copy">{selectedSports.length} selected{pendingCheckout.plan.name.toLowerCase() === "professional" ? " · maximum 5" : " · exactly 1 required"}</p>
-        <div className="account-modal-actions">
-          <button className="button button-quiet" type="button" disabled={working} onClick={() => setPendingCheckout(null)}>Cancel</button>
-          <button className="button button-primary" type="button" disabled={working || selectedSports.length < 1} onClick={continueCheckoutWithSports}>{working ? "Processing…" : `Continue to Stripe · ${pendingCheckout.interval === "monthly" ? money(pendingCheckout.plan.monthly_price_pence) : money(pendingCheckout.plan.annual_price_pence)}`}</button>
+        <div className="account-sport-footer">
+          <p>{selectedSports.length < 1
+            ? (pendingCheckout.plan.name.toLowerCase() === "starter" ? "Choose one sport to continue." : "Choose at least one sport to continue.")
+            : (pendingCheckout.plan.name.toLowerCase() === "starter" ? "Sport selected. You can continue to secure checkout." : `You can select ${5 - selectedSports.length} more sport${5 - selectedSports.length === 1 ? "" : "s"}.`)}</p>
+          <div className="account-modal-actions">
+            <button className="button button-quiet" type="button" disabled={working} onClick={() => setPendingCheckout(null)}>Cancel</button>
+            <button className="button button-primary" type="button" disabled={working || selectedSports.length < 1} onClick={continueCheckoutWithSports}>{working ? "Processing…" : `Continue to Stripe · ${pendingCheckout.interval === "monthly" ? money(pendingCheckout.plan.monthly_price_pence) : money(pendingCheckout.plan.annual_price_pence)}`}</button>
+          </div>
         </div>
       </section>
     </div>}
