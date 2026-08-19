@@ -32,8 +32,8 @@ type CheckoutPlan = { plan: Plan; interval: "monthly" | "annual" } | null;
 
 const fallback: Plan[] = [
   { id: -1, name: "Starter", description: "For individual analysts and developing teams.", monthly_price_pence: 3900, annual_price_pence: 39000, included_seats: 2, max_devices: 2, products: ["analysis"], sports: ["football"], cloud_storage_gb: 25, self_service_upgrades: true },
-  { id: -2, name: "Professional", description: "For clubs and performance departments using connected analysis and review.", monthly_price_pence: 8900, annual_price_pence: 89000, included_seats: 5, max_devices: 5, products: ["analysis", "viewer"], sports: [], cloud_storage_gb: 100, self_service_upgrades: true },
-  { id: -3, name: "Enterprise", description: "For larger organisations that need more users, devices and central control.", monthly_price_pence: 0, annual_price_pence: 0, included_seats: 25, max_devices: 25, products: ["analysis", "viewer"], sports: [], cloud_storage_gb: 500, self_service_upgrades: false },
+  { id: -2, name: "Professional", description: "For clubs and performance departments using connected analysis and review across up to five sports.", monthly_price_pence: 9900, annual_price_pence: 99000, included_seats: 5, max_devices: 5, products: ["analysis", "viewer"], sports: [], cloud_storage_gb: 100, self_service_upgrades: true },
+  { id: -3, name: "Enterprise", description: "For larger multi-team and multi-sport organisations.", monthly_price_pence: 0, annual_price_pence: 0, included_seats: 15, max_devices: 25, products: ["analysis", "viewer"], sports: [], cloud_storage_gb: 500, self_service_upgrades: false },
 ];
 
 function apiBase() {
@@ -52,6 +52,7 @@ export function PricingPlans() {
   const [submitting, setSubmitting] = useState(false);
   const [message, setMessage] = useState("");
   const [checkoutResult, setCheckoutResult] = useState<"success" | "cancelled" | "">("");
+  const [selectedSports, setSelectedSports] = useState<string[]>(["football"]);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -94,12 +95,33 @@ export function PricingPlans() {
 
   const canCheckout = payload.billing_mode === "live" || (payload.billing_mode === "test" && sandboxEnabled);
 
+  function openCheckout(plan: Plan, interval: "monthly" | "annual") {
+    const maxSports = plan.name.toLowerCase() === "starter" ? 1 : 5;
+    const initial = plan.sports.length ? plan.sports.slice(0, maxSports) : ["football"];
+    setSelectedSports(initial);
+    setMessage("");
+    setCheckout({ plan, interval });
+  }
+
+  function toggleSport(key: string, maxSports: number) {
+    setSelectedSports(current => {
+      if (current.includes(key)) return current.filter(value => value !== key);
+      if (current.length >= maxSports) return current;
+      return [...current, key];
+    });
+  }
+
   async function submitCheckout(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!checkout) return;
     setSubmitting(true);
     setMessage("");
     const form = new FormData(event.currentTarget);
+    if (!selectedSports.length) {
+      setMessage("Choose at least one licensed sport.");
+      setSubmitting(false);
+      return;
+    }
     try {
       const response = await fetch(`${apiBase()}/api/v1/subscriptions/public-checkout`, {
         method: "POST",
@@ -110,7 +132,8 @@ export function PricingPlans() {
           organisation_name: String(form.get("organisation") || ""),
           contact_name: String(form.get("name") || ""),
           contact_email: String(form.get("email") || ""),
-          sport: String(form.get("sport") || "football"),
+          sport: selectedSports[0] || "football",
+          sports: selectedSports,
         }),
       });
       const data = await response.json().catch(() => ({}));
@@ -138,7 +161,7 @@ export function PricingPlans() {
           {featured && <small className="recommended">Recommended</small>}
           <p>FAST {plan.name}</p>
           <h2>{plan.name}</h2>
-          <span className="price">{priced && plan.monthly_price_pence > 0 ? `${money(plan.monthly_price_pence)}/mo` : lowerName === "enterprise" ? "Contact us" : "Coming soon"}</span>
+          <span className="price">{priced && plan.monthly_price_pence > 0 ? `${money(plan.monthly_price_pence)}/mo` : lowerName === "enterprise" ? "From £249/mo" : "Coming soon"}</span>
           {priced && plan.annual_price_pence > 0 && <p className="tier-for">{money(plan.annual_price_pence)}/year</p>}
           <p className="tier-for">{plan.description}</p>
           <ul>
@@ -146,12 +169,12 @@ export function PricingPlans() {
             <li>{plan.included_seats} included seat{plan.included_seats === 1 ? "" : "s"}</li>
             <li>Up to {plan.max_devices} device{plan.max_devices === 1 ? "" : "s"}</li>
             {plan.cloud_storage_gb > 0 && <li>{plan.cloud_storage_gb} GB cloud storage</li>}
-            <li>{plan.sports.length ? plan.sports.map(s => s.replaceAll("_", " ")).join(", ") : "Configurable sports access"}</li>
+            <li>{lowerName === "starter" ? "1 licensed sport" : lowerName === "professional" ? "Up to 5 licensed sports" : lowerName === "enterprise" ? "All 14 sports" : "Configurable sports access"}</li>
           </ul>
           {lowerName === "enterprise" ? <Link className={`button ${featured ? "button-primary" : "button-quiet"}`} href="/contact">Contact sales</Link>
             : selfService && canCheckout ? <div className="pricing-actions">
-              <button className={`button ${featured ? "button-primary" : "button-quiet"}`} type="button" onClick={() => setCheckout({ plan, interval: "monthly" })}>{payload.billing_mode === "test" ? "Test monthly checkout" : "Choose monthly"}</button>
-              {plan.annual_price_pence > 0 && <button className="pricing-annual-link" type="button" onClick={() => setCheckout({ plan, interval: "annual" })}>{payload.billing_mode === "test" ? "Test annual checkout" : `Choose annual · ${money(plan.annual_price_pence)}`}</button>}
+              <button className={`button ${featured ? "button-primary" : "button-quiet"}`} type="button" onClick={() => openCheckout(plan, "monthly")}>{payload.billing_mode === "test" ? "Test monthly checkout" : "Choose monthly"}</button>
+              {plan.annual_price_pence > 0 && <button className="pricing-annual-link" type="button" onClick={() => openCheckout(plan, "annual")}>{payload.billing_mode === "test" ? "Test annual checkout" : `Choose annual · ${money(plan.annual_price_pence)}`}</button>}
             </div>
             : <Link className={`button ${featured ? "button-primary" : "button-quiet"}`} href="/trial">Register interest</Link>}
         </article>;
@@ -160,7 +183,7 @@ export function PricingPlans() {
 
     <p className="pricing-note">
       {loaded && payload.billing_mode === "live"
-        ? "FAST Billing is live. Starter is £39/month or £390/year; Professional is £89/month or £890/year. Enterprise is tailored to each organisation."
+        ? "FAST Billing is live. Starter is £39/month or £390/year; Professional is £99/month or £990/year. Enterprise starts from £249/month and is tailored to each organisation. FAST Sports Analytics Ltd is not currently VAT registered, so VAT is not added to these prices."
         : loaded && payload.billing_mode === "test"
         ? sandboxEnabled ? "Stripe sandbox checkout is enabled for this browser session. No real money will move." : "FAST Billing is connected in Stripe test mode. Live purchasing will be enabled after final payment testing."
         : "Final subscription pricing will be published before public launch. FAST Cloud already supports plan, seat, device and billing-state management."}
@@ -176,9 +199,21 @@ export function PricingPlans() {
           <label>Your name<input name="name" autoComplete="name" required maxLength={160}/></label>
           <label>Work email<input name="email" type="email" autoComplete="email" required maxLength={320}/></label>
           <label>Club or organisation<input name="organisation" autoComplete="organization" required maxLength={180}/></label>
-          <label>Primary sport<select name="sport" defaultValue={checkout.plan.sports[0] || "football"} required>
-            {supportedSports.map(sport => <option key={sport.key} value={sport.key}>{sport.name}</option>)}
-          </select></label>
+          <fieldset className="checkout-sports">
+            <legend>{checkout.plan.name.toLowerCase() === "starter" ? "Choose your licensed sport" : "Choose up to 5 licensed sports"}</legend>
+            <p>{selectedSports.length} selected{checkout.plan.name.toLowerCase() === "professional" ? " · maximum 5" : ""}</p>
+            <div className="checkout-sport-grid">
+              {supportedSports.map(sport => {
+                const maxSports = checkout.plan.name.toLowerCase() === "starter" ? 1 : 5;
+                const checked = selectedSports.includes(sport.key);
+                const disabled = !checked && selectedSports.length >= maxSports;
+                return <label key={sport.key} className={disabled ? "disabled" : ""}>
+                  <input type="checkbox" checked={checked} disabled={disabled} onChange={() => toggleSport(sport.key, maxSports)}/>
+                  <span>{sport.name}</span>
+                </label>;
+              })}
+            </div>
+          </fieldset>
           {message && <p className="checkout-error">{message}</p>}
           <button className="button button-primary" type="submit" disabled={submitting}>{submitting ? "Opening Stripe…" : `Continue to Stripe · ${checkout.interval === "monthly" ? money(checkout.plan.monthly_price_pence) : money(checkout.plan.annual_price_pence)}`}</button>
           <small>You will create your FAST administrator password from the secure activation email sent after successful checkout.</small>

@@ -186,6 +186,12 @@ def _provision_public_checkout(db: Session, session, subscription) -> None:
     organisation_name = str(_obj_get(session_metadata, "fast_organisation_name", "") or "").strip()[:180]
     contact_name = str(_obj_get(session_metadata, "fast_contact_name", "") or "").strip()[:160]
     sport = _normalise_sport(str(_obj_get(session_metadata, "fast_sport", "") or ""))
+    raw_sports = str(_obj_get(session_metadata, "fast_sports", "") or "")
+    checkout_sports = [
+        _normalise_sport(value)
+        for value in raw_sports.split(",")
+        if _normalise_sport(value) in SUPPORTED_SPORT_KEYS
+    ]
     interval = str(_obj_get(session_metadata, "fast_billing_interval", "monthly") or "monthly")
     if len(organisation_name) < 2 or not contact_name:
         return
@@ -213,10 +219,12 @@ def _provision_public_checkout(db: Session, session, subscription) -> None:
         return
 
     plan_sports = _loads(plan.sports_json, [])
-    # Public Starter/Professional checkout sells a selected sport entitlement.
-    # Respect the customer's choice even when a seeded plan carries football as
-    # its display/default sport.
-    selected_sports = ([sport] if sport else plan_sports)
+    # Starter sells one sport. Professional sells up to five selected sports.
+    # ``fast_sport`` remains as a backwards-compatible fallback for checkout
+    # sessions created before multi-sport Professional selection was added.
+    selected_sports = checkout_sports or ([sport] if sport else plan_sports)
+    max_sports = 1 if str(plan.name or "").strip().lower() == "starter" else 5
+    selected_sports = list(dict.fromkeys(selected_sports))[:max_sports]
     organisation = Organisation(
         name=organisation_name,
         contact_name=contact_name,
@@ -319,7 +327,7 @@ _STRIPE_PRICE_PLAN_KEYS: dict[str, tuple[str, str]] = {
 # Tier direction must be determined by FAST product level, not by the raw
 # recurring price. For example Professional monthly -> Starter annual is still
 # an entitlement downgrade even though £390/year is numerically greater than
-# £89/month. Billing interval changes within the same tier are handled
+# £99/month. Billing interval changes within the same tier are handled
 # separately: annual -> monthly waits until period end; monthly -> annual is
 # immediate and prorated by Stripe.
 _FAST_PLAN_RANK: dict[str, int] = {
@@ -927,7 +935,9 @@ class PublicCheckoutRequest(BaseModel):
     organisation_name: str = Field(min_length=2, max_length=180)
     contact_name: str = Field(min_length=1, max_length=160)
     contact_email: str = Field(min_length=5, max_length=320)
+    # ``sport`` is retained for backwards compatibility with older website builds.
     sport: str = Field(default="football", max_length=80)
+    sports: list[str] = Field(default_factory=list, max_length=5)
 
 
 @router.post("/public-checkout")
@@ -947,8 +957,18 @@ def create_public_checkout_session(
     organisation_name = payload.organisation_name.strip()
     contact_name = payload.contact_name.strip()
     sport = _normalise_sport(payload.sport)
-    if sport not in SUPPORTED_SPORT_KEYS:
-        raise HTTPException(status_code=422, detail="Choose a supported FAST sport")
+    requested_sports = [
+        _normalise_sport(value)
+        for value in payload.sports
+        if _normalise_sport(value)
+    ]
+    requested_sports = list(dict.fromkeys(requested_sports))
+    if requested_sports and any(value not in SUPPORTED_SPORT_KEYS for value in requested_sports):
+        raise HTTPException(status_code=422, detail="Choose only supported FAST sports")
+    if not requested_sports:
+        if sport not in SUPPORTED_SPORT_KEYS:
+            raise HTTPException(status_code=422, detail="Choose a supported FAST sport")
+        requested_sports = [sport]
 
     if db.scalar(select(User).where(func.lower(User.email) == email)):
         raise HTTPException(status_code=409, detail="That email already has a FAST account. Contact FAST to change an existing subscription.")
@@ -958,8 +978,15 @@ def create_public_checkout_session(
     plan = db.get(SubscriptionPlan, payload.plan_id)
     if not plan or not plan.active:
         raise HTTPException(status_code=404, detail="Subscription plan not found")
-    if str(plan.name or "").strip().lower() not in {"starter", "professional"}:
+    plan_key = str(plan.name or "").strip().lower()
+    if plan_key not in {"starter", "professional"}:
         raise HTTPException(status_code=409, detail="This plan requires a FAST sales-assisted agreement")
+    max_sports = 1 if plan_key == "starter" else 5
+    if len(requested_sports) > max_sports:
+        raise HTTPException(
+            status_code=422,
+            detail=f"FAST {plan.name} includes up to {max_sports} sport{'s' if max_sports != 1 else ''}",
+        )
 
     interval = payload.billing_interval.lower().strip()
     if interval not in {"monthly", "annual"}:
@@ -976,7 +1003,8 @@ def create_public_checkout_session(
         "fast_organisation_name": organisation_name,
         "fast_contact_name": contact_name,
         "fast_contact_email": email,
-        "fast_sport": sport,
+        "fast_sport": requested_sports[0],
+        "fast_sports": ",".join(requested_sports),
     }
     _configure_stripe()
     try:

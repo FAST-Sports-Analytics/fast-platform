@@ -42,9 +42,9 @@ def seed_catalogue(db: Session) -> None:
     # Railway deployments pick up approved FAST pricing without manual DB edits.
     plan_defaults = [
         {"name": "Starter", "description": "For individual analysts and developing teams.", "monthly": 3900, "annual": 39000, "seats": 2, "devices": 2, "storage": 25, "products": ["analysis"], "sports": ["football"], "remote": False, "priority": False, "self_service": True},
-        {"name": "Professional", "description": "For clubs and performance departments using connected analysis and review.", "monthly": 8900, "annual": 89000, "seats": 5, "devices": 5, "storage": 100, "products": ["analysis", "viewer"], "sports": [], "remote": True, "priority": True, "self_service": True},
+        {"name": "Professional", "description": "For clubs and performance departments using connected analysis and review across up to five sports.", "monthly": 9900, "annual": 99000, "seats": 5, "devices": 5, "storage": 100, "products": ["analysis", "viewer"], "sports": [], "remote": True, "priority": True, "self_service": True},
         # Enterprise is intentionally quote-only: a zero amount must never become a free Stripe checkout.
-        {"name": "Enterprise", "description": "For larger organisations requiring advanced platform features and tailored capacity.", "monthly": 0, "annual": 0, "seats": 25, "devices": 25, "storage": 500, "products": ["analysis", "viewer"], "sports": [], "remote": True, "priority": True, "self_service": False},
+        {"name": "Enterprise", "description": "For larger multi-team and multi-sport organisations. From £249/month through FAST Sales.", "monthly": 0, "annual": 0, "seats": 15, "devices": 25, "storage": 500, "products": ["analysis", "viewer"], "sports": [], "remote": True, "priority": True, "self_service": False},
         {"name": "Custom", "description": "Individually configured commercial agreement.", "monthly": 0, "annual": 0, "seats": 1, "devices": 1, "storage": 0, "products": [], "sports": [], "remote": True, "priority": True, "self_service": False},
     ]
     for item in plan_defaults:
