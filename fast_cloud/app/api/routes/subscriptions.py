@@ -1047,6 +1047,30 @@ def create_public_checkout_session(
 class CheckoutRequest(BaseModel):
     plan_id: int
     billing_interval: str = "monthly"
+    sports: list[str] = Field(default_factory=list, max_length=5)
+
+
+def _validated_checkout_sports(payload: CheckoutRequest, plan: SubscriptionPlan) -> list[str]:
+    plan_key = str(plan.name or "").strip().lower()
+    if plan_key not in {"starter", "professional"}:
+        raise HTTPException(status_code=409, detail="This plan requires a FAST sales-assisted agreement")
+    requested_sports = [
+        _normalise_sport(value)
+        for value in payload.sports
+        if _normalise_sport(value)
+    ]
+    requested_sports = list(dict.fromkeys(requested_sports))
+    if any(value not in SUPPORTED_SPORT_KEYS for value in requested_sports):
+        raise HTTPException(status_code=422, detail="Choose only supported FAST sports")
+    max_sports = 1 if plan_key == "starter" else 5
+    if not requested_sports:
+        raise HTTPException(status_code=422, detail="Choose your licensed sport(s) before continuing to Stripe")
+    if len(requested_sports) > max_sports:
+        raise HTTPException(
+            status_code=422,
+            detail=f"FAST {plan.name} includes up to {max_sports} sport{'s' if max_sports != 1 else ''}",
+        )
+    return requested_sports
 
 
 @router.post("/checkout/preview")
@@ -1060,6 +1084,7 @@ def preview_checkout_capacity(
     plan = db.get(SubscriptionPlan, payload.plan_id)
     if not plan or not plan.active:
         raise HTTPException(status_code=404, detail="Subscription plan not found")
+    _validated_checkout_sports(payload, plan)
     interval = payload.billing_interval.lower().strip()
     if interval not in {"monthly", "annual"}:
         raise HTTPException(status_code=422, detail="Billing interval must be monthly or annual")
@@ -1093,6 +1118,7 @@ def create_checkout_session(payload: CheckoutRequest, user: User = Depends(get_c
     plan = db.get(SubscriptionPlan, payload.plan_id)
     if not plan or not plan.active:
         raise HTTPException(status_code=404, detail="Subscription plan not found")
+    requested_sports = _validated_checkout_sports(payload, plan)
     interval = payload.billing_interval.lower().strip()
     if interval not in {"monthly", "annual"}:
         raise HTTPException(status_code=422, detail="Billing interval must be monthly or annual")
@@ -1119,7 +1145,13 @@ def create_checkout_session(payload: CheckoutRequest, user: User = Depends(get_c
     price = _stripe_price_for_plan(plan, interval)
     customer_id = current.external_customer_id if current and current.external_customer_id else None
     customer_email = organisation.contact_email or user.email
-    metadata = {"fast_organisation_id": str(organisation_id), "fast_plan_id": str(plan.id), "fast_billing_interval": interval}
+    metadata = {
+        "fast_organisation_id": str(organisation_id),
+        "fast_plan_id": str(plan.id),
+        "fast_billing_interval": interval,
+        "fast_sport": requested_sports[0],
+        "fast_sports": ",".join(requested_sports),
+    }
     params = {
         "mode": "subscription",
         "line_items": [{"price": str(_obj_get(price, "id")), "quantity": 1}],
@@ -2417,6 +2449,15 @@ def _sync_stripe_subscription(
         # Stripe can still include the old price/plan on a terminal cancelled
         # object; re-provisioning it here would incorrectly restore paid access.
         if item.status in {"active", "trial", "grace_period", "past_due"}:
+            metadata_sports = [
+                _normalise_sport(value)
+                for value in str(_obj_get(metadata, "fast_sports", "") or "").split(",")
+                if _normalise_sport(value) in SUPPORTED_SPORT_KEYS
+            ]
+            metadata_sports = list(dict.fromkeys(metadata_sports))
+            max_sports = 1 if str(effective_plan.name or "").strip().lower() == "starter" else 5
+            if metadata_sports:
+                organisation.sports_json = json.dumps(metadata_sports[:max_sports])
             _ensure_subscription_entitlements(db, organisation, effective_plan, quantity=quantity)
         else:
             _revoke_subscription_entitlements(

@@ -20,6 +20,8 @@ type Plan = {
   self_service_upgrades?: boolean;
 };
 
+type SportOption = { key: string; name: string };
+
 type Subscription = {
   status: string;
   display_status: string;
@@ -101,6 +103,25 @@ type PlanChangePreview = {
   target_device_limit?: number;
 };
 
+const FALLBACK_SPORTS: SportOption[] = [
+  { key: "football", name: "Football" },
+  { key: "futsal", name: "Futsal" },
+  { key: "rugby_union", name: "Rugby Union" },
+  { key: "rugby_league", name: "Rugby League" },
+  { key: "basketball", name: "Basketball" },
+  { key: "field_hockey", name: "Field Hockey" },
+  { key: "ice_hockey", name: "Ice Hockey" },
+  { key: "cricket", name: "Cricket" },
+  { key: "netball", name: "Netball" },
+  { key: "volleyball", name: "Volleyball" },
+  { key: "handball", name: "Handball" },
+  { key: "american_football", name: "American Football" },
+  { key: "tennis", name: "Tennis" },
+  { key: "baseball", name: "Baseball" },
+];
+
+type PendingCheckout = { plan: Plan; interval: "monthly" | "annual" } | null;
+
 function apiBase() {
   return (process.env.NEXT_PUBLIC_FAST_CLOUD_URL || "http://127.0.0.1:8766").replace(/\/+$/, "");
 }
@@ -120,6 +141,9 @@ export default function AccountPage() {
   const [user, setUser] = useState<UserInfo>({});
   const [subscription, setSubscription] = useState<Subscription | null>(null);
   const [plans, setPlans] = useState<Plan[]>([]);
+  const [supportedSports, setSupportedSports] = useState<SportOption[]>(FALLBACK_SPORTS);
+  const [pendingCheckout, setPendingCheckout] = useState<PendingCheckout>(null);
+  const [selectedSports, setSelectedSports] = useState<string[]>([]);
   const [billingMode, setBillingMode] = useState<string>("");
   const [loading, setLoading] = useState(true);
   const [working, setWorking] = useState(false);
@@ -184,6 +208,7 @@ export default function AccountPage() {
       window.sessionStorage.setItem("fast_user", JSON.stringify(profile || stored));
       setSubscription(current.subscription || null);
       setPlans((catalogue.plans || []).filter((plan: Plan) => plan.self_service_upgrades !== false && ["starter", "professional"].includes(plan.name.toLowerCase())));
+      setSupportedSports(Array.isArray(catalogue.supported_sports) && catalogue.supported_sports.length ? catalogue.supported_sports : FALLBACK_SPORTS);
       setBillingMode(catalogue.billing_mode || "");
     } catch (err) {
       setError(err instanceof Error ? err.message : "FAST Cloud could not load your account.");
@@ -241,30 +266,10 @@ export default function AccountPage() {
     // purchase. Existing subscribers continue through the plan-change preview
     // flow so upgrades/downgrades retain their current proration behaviour.
     if (!subscription?.plan) {
-      setWorking(true);
+      setSelectedSports([]);
       setMessage("");
       setError("");
-      try {
-        const preview = await api("/api/v1/subscriptions/checkout/preview", {
-          method: "POST",
-          body: JSON.stringify({ plan_id: plan.id, billing_interval: interval }),
-        });
-        if (preview.downgrade_blocked) {
-          setPlanPreview(preview as PlanChangePreview);
-        } else {
-          const data = await api("/api/v1/subscriptions/checkout", {
-            method: "POST",
-            body: JSON.stringify({ plan_id: plan.id, billing_interval: interval }),
-          });
-          if (!data.url) throw new Error("Stripe Checkout did not return a payment URL.");
-          window.location.assign(data.url);
-          return;
-        }
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "FAST Cloud could not start checkout.");
-      } finally {
-        setWorking(false);
-      }
+      setPendingCheckout({ plan, interval });
       return;
     }
     const samePlan = currentPlanId === plan.id;
@@ -286,6 +291,59 @@ export default function AccountPage() {
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "FAST Cloud could not preview your plan change.");
+    } finally {
+      setWorking(false);
+    }
+  }
+
+  function toggleCheckoutSport(key: string) {
+    if (!pendingCheckout) return;
+    const maxSports = pendingCheckout.plan.name.toLowerCase() === "starter" ? 1 : 5;
+    setSelectedSports(current => {
+      if (current.includes(key)) return current.filter(value => value !== key);
+      if (current.length >= maxSports) return current;
+      return [...current, key];
+    });
+  }
+
+  async function continueCheckoutWithSports() {
+    if (!pendingCheckout) return;
+    const maxSports = pendingCheckout.plan.name.toLowerCase() === "starter" ? 1 : 5;
+    if (selectedSports.length < 1 || selectedSports.length > maxSports) {
+      setError(pendingCheckout.plan.name.toLowerCase() === "starter"
+        ? "Choose exactly one licensed sport before continuing to Stripe."
+        : "Choose between one and five licensed sports before continuing to Stripe.");
+      return;
+    }
+    setWorking(true);
+    setMessage("");
+    setError("");
+    try {
+      const preview = await api("/api/v1/subscriptions/checkout/preview", {
+        method: "POST",
+        body: JSON.stringify({
+          plan_id: pendingCheckout.plan.id,
+          billing_interval: pendingCheckout.interval,
+          sports: selectedSports,
+        }),
+      });
+      setPendingCheckout(null);
+      if (preview.downgrade_blocked) {
+        setPlanPreview(preview as PlanChangePreview);
+      } else {
+        const data = await api("/api/v1/subscriptions/checkout", {
+          method: "POST",
+          body: JSON.stringify({
+            plan_id: pendingCheckout.plan.id,
+            billing_interval: pendingCheckout.interval,
+            sports: selectedSports,
+          }),
+        });
+        if (!data.url) throw new Error("Stripe Checkout did not return a payment URL.");
+        window.location.assign(data.url);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "FAST Cloud could not start checkout.");
     } finally {
       setWorking(false);
     }
@@ -354,6 +412,7 @@ export default function AccountPage() {
           body: JSON.stringify({
             plan_id: planPreview.target_plan.id,
             billing_interval: planPreview.target_billing_interval,
+            sports: selectedSports,
           }),
         });
         if (!data.url) throw new Error("Stripe Checkout did not return a payment URL.");
@@ -556,6 +615,33 @@ export default function AccountPage() {
         </section>
       </>}
     </div>
+
+    {pendingCheckout && <div className="account-modal-backdrop" role="presentation" onMouseDown={() => !working && setPendingCheckout(null)}>
+      <section className="account-modal" role="dialog" aria-modal="true" aria-labelledby="checkout-sports-title" onMouseDown={event => event.stopPropagation()}>
+        <button className="account-modal-close" type="button" aria-label="Close" disabled={working} onClick={() => setPendingCheckout(null)}>×</button>
+        <p className="eyebrow">Licensed sports</p>
+        <h2 id="checkout-sports-title">Choose your FAST {pendingCheckout.plan.name} sport{pendingCheckout.plan.name.toLowerCase() === "starter" ? "" : "s"}</h2>
+        <p className="account-confirm-copy">{pendingCheckout.plan.name.toLowerCase() === "starter"
+          ? "Starter includes exactly one licensed sport. Choose which of the 14 FAST sports this organisation will use."
+          : "Professional includes between one and five licensed sports. Choose the sports this organisation will use."}</p>
+        <div className="checkout-sport-grid">
+          {supportedSports.map(sport => {
+            const maxSports = pendingCheckout.plan.name.toLowerCase() === "starter" ? 1 : 5;
+            const checked = selectedSports.includes(sport.key);
+            const disabled = !checked && selectedSports.length >= maxSports;
+            return <label key={sport.key} className={disabled ? "disabled" : ""}>
+              <input type="checkbox" checked={checked} disabled={working || disabled} onChange={() => toggleCheckoutSport(sport.key)} />
+              <span>{sport.name}</span>
+            </label>;
+          })}
+        </div>
+        <p className="account-confirm-copy">{selectedSports.length} selected{pendingCheckout.plan.name.toLowerCase() === "professional" ? " · maximum 5" : " · exactly 1 required"}</p>
+        <div className="account-modal-actions">
+          <button className="button button-quiet" type="button" disabled={working} onClick={() => setPendingCheckout(null)}>Cancel</button>
+          <button className="button button-primary" type="button" disabled={working || selectedSports.length < 1} onClick={continueCheckoutWithSports}>{working ? "Processing…" : `Continue to Stripe · ${pendingCheckout.interval === "monthly" ? money(pendingCheckout.plan.monthly_price_pence) : money(pendingCheckout.plan.annual_price_pence)}`}</button>
+        </div>
+      </section>
+    </div>}
 
     {cancelSubscriptionOpen && subscription?.plan && <div className="account-modal-backdrop" role="presentation" onMouseDown={() => !working && setCancelSubscriptionOpen(false)}>
       <section className="account-modal" role="dialog" aria-modal="true" aria-labelledby="cancel-subscription-title" onMouseDown={event => event.stopPropagation()}>
