@@ -185,8 +185,19 @@ def _provision_public_checkout(db: Session, session, subscription) -> None:
     email = _normalise_email(str(_obj_get(session_metadata, "fast_contact_email", "") or ""))
     organisation_name = str(_obj_get(session_metadata, "fast_organisation_name", "") or "").strip()[:180]
     contact_name = str(_obj_get(session_metadata, "fast_contact_name", "") or "").strip()[:160]
-    sport = _normalise_sport(str(_obj_get(session_metadata, "fast_sport", "") or ""))
-    raw_sports = str(_obj_get(session_metadata, "fast_sports", "") or "")
+    subscription_metadata = _obj_get(subscription, "metadata", {}) or {}
+    sport = _normalise_sport(
+        str(
+            _obj_get(session_metadata, "fast_sport", "")
+            or _obj_get(subscription_metadata, "fast_sport", "")
+            or ""
+        )
+    )
+    raw_sports = str(
+        _obj_get(session_metadata, "fast_sports", "")
+        or _obj_get(subscription_metadata, "fast_sports", "")
+        or ""
+    )
     checkout_sports = [
         _normalise_sport(value)
         for value in raw_sports.split(",")
@@ -225,6 +236,13 @@ def _provision_public_checkout(db: Session, session, subscription) -> None:
     selected_sports = checkout_sports or ([sport] if sport else plan_sports)
     max_sports = 1 if str(plan.name or "").strip().lower() == "starter" else 5
     selected_sports = list(dict.fromkeys(selected_sports))[:max_sports]
+    if not selected_sports:
+        # A paid Starter/Professional organisation must never be materialised
+        # without a sport entitlement. Leave the webhook retryable instead of
+        # creating a broken "Sports: None" account.
+        raise RuntimeError(
+            f"Public FAST {plan.name} checkout is missing required sport metadata"
+        )
     organisation = Organisation(
         name=organisation_name,
         contact_name=contact_name,
@@ -956,19 +974,22 @@ def create_public_checkout_session(
     email = _normalise_email(payload.contact_email)
     organisation_name = payload.organisation_name.strip()
     contact_name = payload.contact_name.strip()
-    sport = _normalise_sport(payload.sport)
+    # Paid public checkout must carry an explicit sport selection from the
+    # current website. Do not silently fall back to Football for an older/stale
+    # frontend build: that can create a paid organisation with the wrong sports.
     requested_sports = [
         _normalise_sport(value)
         for value in payload.sports
         if _normalise_sport(value)
     ]
     requested_sports = list(dict.fromkeys(requested_sports))
-    if requested_sports and any(value not in SUPPORTED_SPORT_KEYS for value in requested_sports):
-        raise HTTPException(status_code=422, detail="Choose only supported FAST sports")
     if not requested_sports:
-        if sport not in SUPPORTED_SPORT_KEYS:
-            raise HTTPException(status_code=422, detail="Choose a supported FAST sport")
-        requested_sports = [sport]
+        raise HTTPException(
+            status_code=422,
+            detail="Choose your licensed sport(s) before continuing to Stripe",
+        )
+    if any(value not in SUPPORTED_SPORT_KEYS for value in requested_sports):
+        raise HTTPException(status_code=422, detail="Choose only supported FAST sports")
 
     if db.scalar(select(User).where(func.lower(User.email) == email)):
         raise HTTPException(status_code=409, detail="That email already has a FAST account. Contact FAST to change an existing subscription.")

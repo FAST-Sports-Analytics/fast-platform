@@ -52,7 +52,7 @@ export function PricingPlans() {
   const [submitting, setSubmitting] = useState(false);
   const [message, setMessage] = useState("");
   const [checkoutResult, setCheckoutResult] = useState<"success" | "cancelled" | "">("");
-  const [selectedSports, setSelectedSports] = useState<string[]>(["football"]);
+  const [selectedSports, setSelectedSports] = useState<string[]>([]);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -97,7 +97,11 @@ export function PricingPlans() {
 
   function openCheckout(plan: Plan, interval: "monthly" | "annual") {
     const maxSports = plan.name.toLowerCase() === "starter" ? 1 : 5;
-    const initial = plan.sports.length ? plan.sports.slice(0, maxSports) : ["football"];
+    // Never silently choose a sport for a paid subscription. The customer must
+    // explicitly select the sport(s) that will be written to their FAST licence.
+    const initial = plan.sports.length && plan.name.toLowerCase() === "starter"
+      ? plan.sports.slice(0, maxSports)
+      : [];
     setSelectedSports(initial);
     setMessage("");
     setCheckout({ plan, interval });
@@ -200,8 +204,11 @@ export function PricingPlans() {
           <label>Work email<input name="email" type="email" autoComplete="email" required maxLength={320}/></label>
           <label>Club or organisation<input name="organisation" autoComplete="organization" required maxLength={180}/></label>
           <fieldset className="checkout-sports">
-            <legend>{checkout.plan.name.toLowerCase() === "starter" ? "Choose your licensed sport" : "Choose up to 5 licensed sports"}</legend>
-            <p>{selectedSports.length} selected{checkout.plan.name.toLowerCase() === "professional" ? " · maximum 5" : ""}</p>
+            <legend>{checkout.plan.name.toLowerCase() === "starter" ? "Required: choose your licensed sport" : "Required: choose 1–5 licensed sports"}</legend>
+            <p>
+              Your selection controls which sports FAST Analysis and FAST Viewer can access.
+              {" "}{selectedSports.length} selected{checkout.plan.name.toLowerCase() === "professional" ? " · maximum 5" : ""}.
+            </p>
             <div className="checkout-sport-grid">
               {supportedSports.map(sport => {
                 const maxSports = checkout.plan.name.toLowerCase() === "starter" ? 1 : 5;
