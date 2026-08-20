@@ -333,6 +333,8 @@ def current_user_profile(user: User = Depends(get_current_user)) -> dict:
 def change_password(payload: ChangePasswordRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
     if not verify_password(payload.current_password, user.password_hash):
         raise HTTPException(status_code=400, detail="Current password is incorrect")
+    if verify_password(payload.new_password, user.password_hash):
+        raise HTTPException(status_code=400, detail="Your new password must be different from your current password")
     user.password_hash = hash_password(payload.new_password)
     user.must_change_password = False
     db.add(AuditLog(admin_user_id=user.id, action="password_changed", category="user_activity", target_type="user", target_id=user.id, target_label=user.email, details="User changed their password."))
