@@ -523,6 +523,89 @@ def _hard_delete_user(db: Session, user: User) -> None:
     db.delete(user)
 
 
+def _hard_delete_customer_organisation(db: Session, organisation: Organisation) -> None:
+    """Permanently remove a customer organisation and its operational FAST identity.
+
+    This is intentionally different from removing/inviting an organisation user.
+    A deleted public customer must be able to sign up later as a completely fresh
+    customer without old organisation, club, licence, device or membership state
+    being rediscovered merely because the same email address is reused.
+    """
+    subscription = db.scalar(
+        select(OrganisationSubscription).where(
+            OrganisationSubscription.organisation_id == organisation.id
+        )
+    )
+
+    # Preserve billing/crash diagnostics without leaving an FK back to the
+    # deleted customer organisation.
+    db.query(BillingWebhookEvent).filter(
+        BillingWebhookEvent.organisation_id == organisation.id
+    ).update(
+        {
+            BillingWebhookEvent.organisation_id: None,
+            BillingWebhookEvent.matched: False,
+        },
+        synchronize_session=False,
+    )
+    db.query(CrashReport).filter(
+        CrashReport.organisation_id == organisation.id
+    ).update(
+        {CrashReport.organisation_id: None},
+        synchronize_session=False,
+    )
+
+    if subscription:
+        db.delete(subscription)
+
+    clubs = db.scalars(
+        select(Club).where(Club.organisation_id == organisation.id)
+    ).all()
+    for club in clubs:
+        licence_ids = [
+            item.id
+            for item in db.scalars(
+                select(Licence).where(Licence.club_id == club.id)
+            ).all()
+        ]
+        if licence_ids:
+            device_ids = [
+                item.id
+                for item in db.scalars(
+                    select(DeviceActivation).where(
+                        DeviceActivation.licence_id.in_(licence_ids)
+                    )
+                ).all()
+            ]
+            if device_ids:
+                db.query(RemoteCommand).filter(
+                    RemoteCommand.device_activation_id.in_(device_ids)
+                ).delete(synchronize_session=False)
+                db.query(DeviceAuditLog).filter(
+                    DeviceAuditLog.device_activation_id.in_(device_ids)
+                ).delete(synchronize_session=False)
+
+            db.query(DeviceActivation).filter(
+                DeviceActivation.licence_id.in_(licence_ids)
+            ).delete(synchronize_session=False)
+            db.query(Licence).filter(
+                Licence.id.in_(licence_ids)
+            ).delete(synchronize_session=False)
+
+        db.query(ClubMember).filter(
+            ClubMember.club_id == club.id
+        ).delete(synchronize_session=False)
+        db.delete(club)
+
+    users = db.scalars(
+        select(User).where(User.organisation_id == organisation.id)
+    ).all()
+    for customer_user in users:
+        _hard_delete_user(db, customer_user)
+
+    db.delete(organisation)
+
+
 @router.post("/users/{user_id}/delete")
 def delete_user(
     user_id: int,
@@ -539,12 +622,87 @@ def delete_user(
             "/admin/users?error=You+cannot+delete+your+own+administrator+account.",
             status_code=303,
         )
+
+    # A public customer administrator represents the customer organisation,
+    # not merely an invited seat. Deleting that customer must remove the old
+    # operational organisation identity too; otherwise reusing the same email
+    # later can leave stale licences/clubs/content relationships behind.
+    organisation = (
+        db.get(Organisation, int(user.organisation_id))
+        if user.organisation_id is not None
+        else None
+    )
+    is_customer_admin = bool(
+        organisation
+        and str(user.role or "").strip().lower() == "administrator"
+    )
+
+    if is_customer_admin:
+        subscription = db.scalar(
+            select(OrganisationSubscription).where(
+                OrganisationSubscription.organisation_id == organisation.id
+            )
+        )
+        if (
+            subscription
+            and subscription.external_subscription_id
+            and str(subscription.status or "").lower()
+            not in {"cancelled", "expired"}
+        ):
+            separator = "&" if "?" in return_to else "?"
+            return RedirectResponse(
+                f"{return_to}{separator}error=This+customer+still+has+an+active+Stripe+subscription.+Cancel+or+expire+the+subscription+before+permanent+customer+deletion.",
+                status_code=303,
+            )
+
+        label = user.email
+        organisation_label = organisation.name
+        _record_audit(
+            db,
+            admin,
+            "deleted",
+            "organisation",
+            target_type="organisation",
+            target_id=organisation.id,
+            target_label=organisation_label,
+            details=(
+                f"Customer organisation permanently deleted via administrator account {label}. "
+                "Users, memberships, clubs, licences and active device records removed. "
+                "A future public signup using the same email is treated as a new customer."
+            ),
+        )
+        _hard_delete_customer_organisation(db, organisation)
+        db.commit()
+        separator = "&" if "?" in return_to else "?"
+        return RedirectResponse(
+            f"{return_to}{separator}message=Customer+organisation+and+administrator+account+deleted+permanently.",
+            status_code=303,
+        )
+
+    # Non-administrator/invited users are seats within an organisation. Deleting
+    # one of them must not delete the customer organisation.
     label = user.email
-    _record_audit(db, admin, "deleted", "user", target_type="user", target_id=user.id, target_label=label, details="Customer account permanently deleted; licences, memberships and active device records removed.")
+    _record_audit(
+        db,
+        admin,
+        "deleted",
+        "user",
+        target_type="user",
+        target_id=user.id,
+        target_label=label,
+        details=(
+            "Organisation user permanently deleted; licences, memberships and "
+            "active device records associated directly with that user removed. "
+            "The customer organisation was retained."
+        ),
+    )
     _hard_delete_user(db, user)
     db.commit()
     separator = "&" if "?" in return_to else "?"
-    return RedirectResponse(f"{return_to}{separator}message=User+deleted+permanently.", status_code=303)
+    return RedirectResponse(
+        f"{return_to}{separator}message=User+deleted+permanently.",
+        status_code=303,
+    )
 
 
 
@@ -946,34 +1104,10 @@ def delete_organisation(
     label = organisation.name
     _record_audit(db, admin, "deleted", "organisation", target_type="organisation", target_id=organisation.id, target_label=label, details="Organisation permanently deleted from FAST Cloud.")
 
-    # Keep billing/crash diagnostics usable without retaining the organisation row.
-    db.query(BillingWebhookEvent).filter(BillingWebhookEvent.organisation_id == organisation.id).update({BillingWebhookEvent.organisation_id: None, BillingWebhookEvent.matched: False}, synchronize_session=False)
-    db.query(CrashReport).filter(CrashReport.organisation_id == organisation.id).update({CrashReport.organisation_id: None}, synchronize_session=False)
-    if subscription:
-        db.delete(subscription)
-
-    clubs = db.scalars(select(Club).where(Club.organisation_id == organisation.id)).all()
-    for club in clubs:
-        licence_ids = [item.id for item in db.scalars(select(Licence).where(Licence.club_id == club.id)).all()]
-        if licence_ids:
-            device_ids = [item.id for item in db.scalars(select(DeviceActivation).where(DeviceActivation.licence_id.in_(licence_ids))).all()]
-            if device_ids:
-                db.query(RemoteCommand).filter(RemoteCommand.device_activation_id.in_(device_ids)).delete(synchronize_session=False)
-                db.query(DeviceAuditLog).filter(DeviceAuditLog.device_activation_id.in_(device_ids)).delete(synchronize_session=False)
-            db.query(DeviceActivation).filter(DeviceActivation.licence_id.in_(licence_ids)).delete(synchronize_session=False)
-            db.query(Licence).filter(Licence.id.in_(licence_ids)).delete(synchronize_session=False)
-        db.query(ClubMember).filter(ClubMember.club_id == club.id).delete(synchronize_session=False)
-        db.delete(club)
-
-    users = db.scalars(select(User).where(User.organisation_id == organisation.id)).all()
-    for user in users:
-        if user.id == admin.id:
-            continue
-        _hard_delete_user(db, user)
-
-    db.delete(organisation)
+    _hard_delete_customer_organisation(db, organisation)
     db.commit()
     return RedirectResponse("/admin/organisations?message=Organisation+deleted+permanently.", status_code=303)
+
 
 
 @router.post("/organisations/{organisation_id}/clubs")
