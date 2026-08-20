@@ -437,6 +437,17 @@ def hard_delete_customer_organisation(db: Session, organisation: Organisation) -
     db.delete(organisation)
 
 
+def _stripe_object_id(value) -> str:
+    """Return a Stripe resource ID from either an ID string or expanded object."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, dict):
+        return str(value.get("id") or "").strip()
+    return str(getattr(value, "id", "") or "").strip()
+
+
 def _stripe_test_clock_now_for_organisation(
     db: Session, organisation: Organisation
 ) -> datetime | None:
@@ -463,9 +474,13 @@ def _stripe_test_clock_now_for_organisation(
     try:
         stripe.api_key = settings.stripe_secret_key
         customer = stripe.Customer.retrieve(customer_id)
-        test_clock_id = str(getattr(customer, "test_clock", None) or "").strip()
+        # Stripe may return ``test_clock`` as either ``clock_...`` or an
+        # expanded TestClock object.  Converting an expanded object with str()
+        # produces a representation that is not a valid Stripe resource ID,
+        # causing the retention worker to silently fall back to wall-clock time.
+        test_clock_id = _stripe_object_id(getattr(customer, "test_clock", None))
         if not test_clock_id and isinstance(customer, dict):
-            test_clock_id = str(customer.get("test_clock") or "").strip()
+            test_clock_id = _stripe_object_id(customer.get("test_clock"))
         if not test_clock_id:
             return None
 

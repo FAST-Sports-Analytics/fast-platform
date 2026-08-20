@@ -21,5 +21,5 @@
 <td>{{ item.subscription_tier or 'FAST Professional' }}<br><span class="muted">{% if item.expires_at %}Expires {{ item.expires_at.strftime('%d.%m.%Y') }}{% else %}No expiry{% endif %}</span></td>
 <td>{{ item.clubs|map(attribute='members')|map('length')|sum }} / {{ item.max_seats or 1 }}</td>
 <td>{{ item.clubs|length }}</td><td>{{ item.contact_name or 'Not set' }}<br><span class="muted">{{ item.contact_email or '' }}</span></td>
-<td><span class="badge {{ item.status }}">{{ item.status|title }}</span></td><td><a class="button" href="/admin/organisations/{{ item.id }}">Open</a></td></tr>{% else %}<tr><td colspan="7">No organisations created yet.</td></tr>{% endfor %}</tbody></table></div></section>
+<td>{% if item.deletion_scheduled_at %}<span class="badge suspended">Retention / Cancelled</span>{% else %}<span class="badge {{ item.status }}">{{ item.status|title }}</span>{% endif %}</td><td><a class="button" href="/admin/organisations/{{ item.id }}">Open</a></td></tr>{% else %}<tr><td colspan="7">No organisations created yet.</td></tr>{% endfor %}</tbody></table></div></section>
 {% endblock %}
