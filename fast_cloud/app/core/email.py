@@ -154,25 +154,38 @@ def branded_action_email(
     expiry_text: str,
     footer_text: str,
 ) -> tuple[str, str]:
-    """Return matching plain-text and branded HTML variants."""
+    """Return matching plain-text and FAST-branded HTML variants."""
     text = (
         f"{heading}\n\n{intro}\n\n{action_label}: {action_url}\n\n"
         f"{expiry_text}\n\n{footer_text}\n\nFAST Sports Analytics\n"
     )
+
+    logo_url = (settings.email_logo_url or "").strip()
+    if logo_url:
+        brand_header = (
+            f'<img src="{escape(logo_url, quote=True)}" alt="FAST Sports Analytics" '
+            'width="210" style="display:block;width:210px;max-width:100%;height:auto;border:0;outline:none;text-decoration:none;">'
+        )
+    else:
+        brand_header = (
+            '<div style="font-size:12px;letter-spacing:2px;color:#00C853;font-weight:700;">'
+            'FAST SPORTS ANALYTICS</div>'
+        )
+
     html = f"""<!doctype html>
 <html>
   <body style="margin:0;background:#101416;color:#F4F6F7;font-family:Arial,Helvetica,sans-serif;">
     <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#101416;padding:32px 16px;">
       <tr><td align="center">
         <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:620px;background:#1E2227;border:1px solid #30373B;border-radius:14px;overflow:hidden;">
-          <tr><td style="padding:28px 32px;border-bottom:1px solid #30373B;">
-            <div style="font-size:12px;letter-spacing:2px;color:#19D978;font-weight:700;">FAST SPORTS ANALYTICS</div>
+          <tr><td style="padding:26px 32px;border-bottom:1px solid #30373B;">
+            {brand_header}
           </td></tr>
           <tr><td style="padding:36px 32px;">
             <h1 style="margin:0 0 18px;font-size:28px;line-height:1.2;color:#FFFFFF;">{escape(heading)}</h1>
             <p style="margin:0 0 26px;font-size:16px;line-height:1.6;color:#C8D0D4;">{escape(intro)}</p>
             <p style="margin:0 0 28px;">
-              <a href="{escape(action_url, quote=True)}" style="display:inline-block;background:#19D978;color:#08110D;text-decoration:none;font-weight:700;padding:14px 22px;border-radius:8px;">{escape(action_label)}</a>
+              <a href="{escape(action_url, quote=True)}" style="display:inline-block;background:#00C853;color:#08110D;text-decoration:none;font-weight:700;padding:14px 22px;border-radius:8px;">{escape(action_label)}</a>
             </p>
             <p style="margin:0 0 10px;font-size:13px;line-height:1.5;color:#94A0A6;">{escape(expiry_text)}</p>
             <p style="margin:0;font-size:13px;line-height:1.5;color:#94A0A6;">{escape(footer_text)}</p>

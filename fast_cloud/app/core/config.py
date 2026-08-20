@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     email_from_name: str = "FAST Sports Analytics"
     email_from_email: str = ""
     email_reply_to: str = "support@fastsportsanalytics.com"
+    email_logo_url: str = ""
     email_timeout_seconds: int = 15
     resend_api_key: str = ""
     resend_api_base: str = "https://api.resend.com"
