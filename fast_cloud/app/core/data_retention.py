@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import stripe
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -220,15 +222,19 @@ def schedule_organisation_deletion(
             user.password_reset_token_hash = None
             user.password_reset_expires_at = None
 
-    _retention_audit(
-        db,
-        organisation,
-        action="deletion_scheduled",
-        details=(
-            f"31-day customer data recovery period scheduled; reason={reason}; "
-            f"purge_at={scheduled_at.isoformat()}; identity_released={bool(release_identity)}."
-        ),
-    )
+    # Scheduling can be reached more than once from Stripe lifecycle sync/webhooks.
+    # Only create a new audit row when the retention deadline was actually created
+    # or changed; otherwise repeated provider events make the audit trail noisy.
+    if newly_scheduled:
+        _retention_audit(
+            db,
+            organisation,
+            action="deletion_scheduled",
+            details=(
+                f"31-day customer data recovery period scheduled; reason={reason}; "
+                f"purge_at={scheduled_at.isoformat()}; identity_released={bool(release_identity)}."
+            ),
+        )
     return scheduled_at
 
 
@@ -431,26 +437,81 @@ def hard_delete_customer_organisation(db: Session, organisation: Organisation) -
     db.delete(organisation)
 
 
+def _stripe_test_clock_now_for_organisation(
+    db: Session, organisation: Organisation
+) -> datetime | None:
+    """Return the sandbox Test Clock time for an organisation, when applicable.
+
+    Production customers do not have a Stripe Test Clock, so this returns None
+    and retention uses normal UTC wall-clock time. During sandbox acceptance tests
+    it lets FAST's own retention worker observe the same simulated date as Stripe.
+    """
+    if not settings.stripe_secret_key:
+        return None
+
+    subscription = db.scalar(
+        select(OrganisationSubscription).where(
+            OrganisationSubscription.organisation_id == organisation.id
+        )
+    )
+    customer_id = str(
+        (subscription.external_customer_id if subscription else None) or ""
+    ).strip()
+    if not customer_id:
+        return None
+
+    try:
+        stripe.api_key = settings.stripe_secret_key
+        customer = stripe.Customer.retrieve(customer_id)
+        test_clock_id = str(getattr(customer, "test_clock", None) or "").strip()
+        if not test_clock_id and isinstance(customer, dict):
+            test_clock_id = str(customer.get("test_clock") or "").strip()
+        if not test_clock_id:
+            return None
+
+        test_clock = stripe.test_helpers.TestClock.retrieve(test_clock_id)
+        frozen_time = getattr(test_clock, "frozen_time", None)
+        if frozen_time is None and isinstance(test_clock, dict):
+            frozen_time = test_clock.get("frozen_time")
+        if not frozen_time:
+            return None
+        return datetime.fromtimestamp(int(frozen_time), tz=timezone.utc)
+    except Exception:
+        # Retention must remain available even if Stripe is temporarily
+        # unreachable. The next hourly pass retries automatically.
+        return None
+
+
 def purge_due_organisations(
     db: Session,
     *,
     now: datetime | None = None,
 ) -> int:
     """Purge all customer organisations whose 31-day recovery period has expired."""
-    current = _utc(now) or datetime.now(timezone.utc)
-    due = db.scalars(
+    wall_clock_now = _utc(now) or datetime.now(timezone.utc)
+    candidates = db.scalars(
         select(Organisation)
-        .where(
-            Organisation.deletion_scheduled_at.is_not(None),
-            Organisation.deletion_scheduled_at <= current,
-        )
+        .where(Organisation.deletion_scheduled_at.is_not(None))
         .order_by(Organisation.deletion_scheduled_at)
     ).all()
 
     purged = 0
-    for organisation in due:
-        label = organisation.name
+    for organisation in candidates:
         scheduled_at = _utc(organisation.deletion_scheduled_at)
+        if not scheduled_at:
+            continue
+
+        # An explicit ``now`` is authoritative for tests/callers. Otherwise use
+        # Stripe's Test Clock for sandbox customers and real UTC for live ones.
+        current = wall_clock_now
+        if now is None:
+            provider_now = _stripe_test_clock_now_for_organisation(db, organisation)
+            if provider_now is not None:
+                current = provider_now
+        if scheduled_at > current:
+            continue
+
+        label = organisation.name
         _retention_audit(
             db,
             organisation,
