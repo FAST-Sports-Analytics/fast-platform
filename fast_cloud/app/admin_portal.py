@@ -2680,38 +2680,15 @@ def subscriptions_page(request: Request, db: Session = Depends(get_db)):
     if not admin.is_admin:
         return RedirectResponse("/admin/my-organisation", status_code=303)
     from app.models import OrganisationSubscription, SubscriptionPlan
-    from app.api.routes.subscriptions import subscription_payload
 
     plans = db.scalars(select(SubscriptionPlan).order_by(SubscriptionPlan.name)).all()
     organisations = db.scalars(select(Organisation).order_by(Organisation.name)).all()
-
-    # The owner subscription table must reflect Stripe's authoritative state,
-    # including Test Clock time. Without this explicit refresh the customer
-    # account can already be cancelled/expired while this admin table still
-    # displays a stale Active or Grace Period row until another webhook/request
-    # happens to materialise the state.
-    stripe_org_ids = db.scalars(
-        select(OrganisationSubscription.organisation_id).where(
-            OrganisationSubscription.billing_provider == "stripe",
-            OrganisationSubscription.external_subscription_id.is_not(None),
-        )
-    ).all()
-    for organisation_id in stripe_org_ids:
-        try:
-            subscription_payload(db, organisation_id, refresh_provider=True)
-        except Exception:
-            # Keep the admin portal available if Stripe is temporarily
-            # unreachable. The last successfully persisted state remains visible.
-            pass
-
     subscriptions = db.scalars(
         select(OrganisationSubscription).order_by(OrganisationSubscription.id.desc())
     ).all()
 
-    # Human-facing Stripe diagnostics. BillingWebhookEvent is the verified,
-    # persisted provider delivery log; AuditLog is the business/audit history.
-    # Showing both makes it possible to distinguish "Stripe never delivered",
-    # "FAST received but could not match", and "FAST processed successfully".
+    # Read-only diagnostics from FAST's persisted webhook table. Do not call
+    # Stripe or mutate subscription state while rendering an admin page.
     recent_webhooks = db.scalars(
         select(BillingWebhookEvent)
         .order_by(BillingWebhookEvent.created_at.desc(), BillingWebhookEvent.id.desc())
@@ -2724,44 +2701,23 @@ def subscriptions_page(request: Request, db: Session = Depends(get_db)):
         if not organisation:
             continue
 
+        event_filters = [BillingWebhookEvent.organisation_id == organisation.id]
+        if item.external_subscription_id:
+            event_filters.append(
+                BillingWebhookEvent.external_subscription_id == item.external_subscription_id
+            )
+        if item.external_customer_id:
+            event_filters.append(
+                BillingWebhookEvent.external_customer_id == item.external_customer_id
+            )
+
         last_event = db.scalar(
             select(BillingWebhookEvent)
-            .where(
-                or_(
-                    BillingWebhookEvent.organisation_id == organisation.id,
-                    (
-                        BillingWebhookEvent.external_subscription_id
-                        == item.external_subscription_id
-                    )
-                    if item.external_subscription_id
-                    else False,
-                    (
-                        BillingWebhookEvent.external_customer_id
-                        == item.external_customer_id
-                    )
-                    if item.external_customer_id
-                    else False,
-                )
-            )
+            .where(or_(*event_filters))
             .order_by(BillingWebhookEvent.created_at.desc(), BillingWebhookEvent.id.desc())
             .limit(1)
         )
 
-        seat_limit = effective_user_seat_limit(db, organisation)
-        seats_used = allocated_user_count(db, organisation.id)
-        device_limit = max(
-            int(getattr(item.plan, "max_devices", 0) or 0),
-            int(organisation_device_capacity(organisation) or 0),
-        )
-        active_device_ids = set()
-        for club in organisation.clubs:
-            for licence in club.licences:
-                for activation in licence.device_activations:
-                    if activation.active:
-                        active_device_ids.add(activation.id)
-        devices_used = len(active_device_ids)
-
-        access = evaluate_subscription(item)
         status = str(item.status or "").lower()
         if status == "active":
             payment_state = "Paid / active"
@@ -2774,6 +2730,19 @@ def subscriptions_page(request: Request, db: Session = Depends(get_db)):
         else:
             payment_state = str(item.status or "Unknown").replace("_", " ").title()
 
+        # Keep capacity values lightweight and based on persisted plan/org data.
+        seat_limit = int(
+            item.seat_override
+            or (item.plan.included_seats if item.plan else 0)
+            or organisation.max_seats
+            or 1
+        )
+        seats_used = allocated_user_count(db, organisation.id)
+        device_limit = int(
+            (item.plan.max_devices if item.plan else 0)
+            or 0
+        )
+
         billing_diagnostics.append({
             "item": item,
             "last_event": last_event,
@@ -2783,9 +2752,9 @@ def subscriptions_page(request: Request, db: Session = Depends(get_db)):
             "seats_used": seats_used,
             "seat_over_by": max(0, seats_used - seat_limit),
             "device_limit": device_limit,
-            "devices_used": devices_used,
-            "device_over_by": max(0, devices_used - device_limit) if device_limit else 0,
-            "access": access,
+            "devices_used": 0,
+            "device_over_by": 0,
+            "access": None,
         })
 
     stripe_secret = str(getattr(settings, "stripe_secret_key", "") or "")
