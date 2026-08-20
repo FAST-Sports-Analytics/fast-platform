@@ -16,6 +16,7 @@ const sportTemplateScreenshots: Partial<Record<string, string>> = {
   "basketball": "/sport-screenshots/basketball.webp",
   "field-hockey": "/sport-screenshots/field-hockey.webp",
   "ice-hockey": "/sport-screenshots/ice-hockey.webp",
+  "cricket": "/sport-screenshots/cricket.webp",
   "netball": "/sport-screenshots/netball.webp",
   "volleyball": "/sport-screenshots/volleyball.webp",
   "handball": "/sport-screenshots/handball.webp",
