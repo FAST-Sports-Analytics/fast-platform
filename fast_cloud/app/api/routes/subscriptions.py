@@ -2581,6 +2581,69 @@ def _sync_stripe_subscription(
                     licence.expires_at = item.current_period_ends_at
 
 
+
+def _record_subscription_billing_audit(
+    db: Session,
+    item: OrganisationSubscription | None,
+    *,
+    action: str,
+    details: str,
+    external_event_id: str = "",
+) -> None:
+    """Write one organisation billing audit record for a matched Stripe event.
+
+    BillingWebhookEvent remains the low-level provider diagnostic log. AuditLog
+    is the human-facing customer/organisation history shown in FAST Cloud Admin.
+    Stripe can retry the same webhook, so use the provider event id in details
+    and suppress duplicate AuditLog rows for that event.
+    """
+    if not item:
+        return
+
+    organisation = db.get(Organisation, item.organisation_id)
+    if not organisation:
+        return
+
+    admin_user = db.scalar(
+        select(User).where(
+            User.organisation_id == organisation.id,
+            User.role == "administrator",
+            User.status.in_(["active", "invited"]),
+        ).order_by(User.id)
+    )
+    if not admin_user:
+        return
+
+    event_marker = f"stripe_event={external_event_id}" if external_event_id else ""
+    if event_marker:
+        duplicate = db.scalar(
+            select(AuditLog.id).where(
+                AuditLog.category == "billing",
+                AuditLog.target_type == "organisation",
+                AuditLog.target_id == organisation.id,
+                AuditLog.details.contains(event_marker),
+            )
+        )
+        if duplicate:
+            return
+
+    audit_details = details.strip()
+    if event_marker:
+        audit_details = f"{audit_details} {event_marker}".strip()
+
+    db.add(
+        AuditLog(
+            admin_user_id=admin_user.id,
+            action=action,
+            category="billing",
+            target_type="organisation",
+            target_id=organisation.id,
+            target_label=organisation.name,
+            details=audit_details,
+        )
+    )
+
+
 @router.post("/webhooks/stripe")
 async def stripe_webhook(request: Request) -> dict:
     if not _stripe_ready(webhook=True):
@@ -2594,6 +2657,7 @@ async def stripe_webhook(request: Request) -> dict:
         raise HTTPException(status_code=400, detail="Invalid Stripe webhook") from exc
 
     event_type = str(_obj_get(event, "type", ""))
+    external_event_id = str(_obj_get(event, "id", "") or "")
     event_created_at = _stripe_datetime(_obj_get(event, "created"))
     data = _obj_get(_obj_get(event, "data", {}), "object", {})
     with SessionLocal() as db:
@@ -2618,6 +2682,22 @@ async def stripe_webhook(request: Request) -> dict:
                         customer_id=_stripe_customer_id(subscription),
                     )
                     details = "Checkout completed and FAST subscription synchronised."
+                    if matched_item:
+                        plan = db.get(SubscriptionPlan, matched_item.plan_id) if matched_item.plan_id else None
+                        organisation = db.get(Organisation, matched_item.organisation_id)
+                        selected_sports = _loads(organisation.sports_json, []) if organisation else []
+                        _record_subscription_billing_audit(
+                            db,
+                            matched_item,
+                            action="subscription_started",
+                            details=(
+                                f"Stripe checkout completed; FAST {plan.name if plan else 'subscription'} "
+                                f"({matched_item.billing_interval}) activated"
+                                f"; sports={', '.join(selected_sports) if selected_sports else 'none'}"
+                                f"; status={matched_item.status}."
+                            ),
+                            external_event_id=external_event_id,
+                        )
                 else:
                     processing_status = "ignored"
                     details = "Checkout completed without a subscription reference."
@@ -2664,6 +2744,13 @@ async def stripe_webhook(request: Request) -> dict:
                         if terminal_org:
                             _revoke_subscription_entitlements(db, terminal_org, ended_at=terminal_end)
                         details = "Stripe subscription deleted; FAST paid access and licence entitlements revoked."
+                        _record_subscription_billing_audit(
+                            db,
+                            matched_item,
+                            action="subscription_ended",
+                            details=details,
+                            external_event_id=external_event_id,
+                        )
                         _send_billing_email(
                             db, matched_item,
                             subject="Your FAST subscription has ended",
@@ -2692,6 +2779,13 @@ async def stripe_webhook(request: Request) -> dict:
                         f"Payment failure applied; FAST access remains available during grace until "
                         f"{matched_item.grace_ends_at.isoformat() if matched_item.grace_ends_at else 'not set'}."
                     )
+                    _record_subscription_billing_audit(
+                        db,
+                        matched_item,
+                        action="payment_failed",
+                        details=details,
+                        external_event_id=external_event_id,
+                    )
                     _send_billing_email(
                         db, matched_item,
                         subject="Action required: FAST payment failed",
@@ -2712,6 +2806,13 @@ async def stripe_webhook(request: Request) -> dict:
                 matched_item = _apply_payment_recovery(db, data)
                 if matched_item:
                     details = "Invoice paid; FAST subscription restored to active and grace cleared."
+                    _record_subscription_billing_audit(
+                        db,
+                        matched_item,
+                        action="payment_received",
+                        details=details,
+                        external_event_id=external_event_id,
+                    )
                     _send_billing_email(
                         db, matched_item,
                         subject="FAST payment received",
