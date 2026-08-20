@@ -512,10 +512,10 @@ def _stripe_test_clock_details_for_organisation(
             except Exception:
                 test_clock_id = ""
 
-        # Important cancellation fallback: invoices created under a Test Clock
-        # retain their ``test_clock`` reference even after the subscription has
-        # reached its terminal state. This lets the 31-day purge test continue
-        # to use Stripe's simulated time after cancellation.
+        # Some terminal Stripe resources stop returning ``test_clock`` after
+        # cancellation. Invoices are worth checking first, but Stripe invoice
+        # objects do not expose the relationship consistently across API
+        # versions.
         if not test_clock_id and customer_id:
             try:
                 invoices = stripe.Invoice.list(customer=customer_id, limit=10)
@@ -530,6 +530,35 @@ def _stripe_test_clock_details_for_organisation(
                         test_clock_id = _stripe_object_id(invoice.get("test_clock"))
                     if test_clock_id:
                         break
+            except Exception:
+                test_clock_id = ""
+
+        # Final sandbox fallback: enumerate Test Clocks and ask Stripe for the
+        # customers attached to each clock. This is deliberately only reached
+        # when the direct subscription/customer/invoice lookups above have lost
+        # the relationship. It allows an already-cancelled test customer to keep
+        # following its simulated clock during the 31-day retention test.
+        # Live customers never appear in a Test Clock customer listing.
+        if not test_clock_id and customer_id:
+            try:
+                clocks = stripe.test_helpers.TestClock.list(limit=100)
+                clock_rows = list(getattr(clocks, "data", None) or [])
+                if not clock_rows and isinstance(clocks, dict):
+                    clock_rows = list(clocks.get("data") or [])
+                for clock in clock_rows:
+                    clock_id = _stripe_object_id(clock)
+                    if not clock_id:
+                        continue
+                    try:
+                        customers = stripe.Customer.list(test_clock=clock_id, limit=100)
+                        customer_rows = list(getattr(customers, "data", None) or [])
+                        if not customer_rows and isinstance(customers, dict):
+                            customer_rows = list(customers.get("data") or [])
+                        if any(_stripe_object_id(row) == customer_id for row in customer_rows):
+                            test_clock_id = clock_id
+                            break
+                    except Exception:
+                        continue
             except Exception:
                 test_clock_id = ""
 
