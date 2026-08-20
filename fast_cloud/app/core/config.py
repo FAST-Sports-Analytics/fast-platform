@@ -52,6 +52,14 @@ class Settings(BaseSettings):
     billing_currency: str = "gbp"
     billing_grace_days: int = 7
 
+    # VAT / Stripe Tax readiness.
+    # Keep disabled until FAST is VAT registered. When enabled, customer-facing
+    # catalogue prices remain the final amount paid; Stripe Prices must therefore
+    # be configured with tax_behavior="inclusive".
+    vat_enabled: bool = False
+    vat_registration_number: str = ""
+    stripe_automatic_tax_enabled: bool = False
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_prefix="FAST_CLOUD_",

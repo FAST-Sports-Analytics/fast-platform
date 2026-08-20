@@ -320,6 +320,46 @@ def _configure_stripe() -> None:
         stripe.api_key = _stripe_secret_key()
 
 
+def _checkout_tax_params(price) -> dict:
+    """Return Stripe Checkout tax parameters without ever increasing FAST's advertised price accidentally.
+
+    VAT is OFF by default. Once FAST is VAT registered, both VAT and Stripe
+    automatic tax must be explicitly enabled and the selected Stripe Price must
+    be tax-inclusive. If any of those safeguards are missing, checkout is
+    blocked instead of silently adding tax on top of £39/£99/etc.
+    """
+    if not bool(settings.vat_enabled):
+        return {}
+
+    if not bool(settings.stripe_automatic_tax_enabled):
+        raise HTTPException(
+            status_code=503,
+            detail="VAT billing is enabled but Stripe automatic tax is not enabled in FAST Cloud",
+        )
+
+    vat_number = str(settings.vat_registration_number or "").strip()
+    if not vat_number:
+        raise HTTPException(
+            status_code=503,
+            detail="VAT billing is enabled but the FAST VAT registration number is not configured",
+        )
+
+    tax_behavior = str(_obj_get(price, "tax_behavior", "") or "").strip().lower()
+    if tax_behavior != "inclusive":
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "VAT billing requires an inclusive-tax Stripe Price so the advertised "
+                "FAST price remains the final customer price"
+            ),
+        )
+
+    return {
+        "automatic_tax": {"enabled": True},
+        "tax_id_collection": {"enabled": True},
+    }
+
+
 # Stable FAST catalogue lookup keys.  The Professional sandbox prices currently
 # resolve to price_1U3DxcGksGfK5ZjdPqDjvJb7 (monthly) and
 # price_1U3DxcGksGfK5ZjdRvwhIQWd (annual).  Checkout resolves by lookup key so
@@ -1026,8 +1066,11 @@ def create_public_checkout_session(
         "fast_contact_email": email,
         "fast_sport": requested_sports[0],
         "fast_sports": ",".join(requested_sports),
+        "fast_vat_enabled": "1" if settings.vat_enabled else "0",
+        "fast_price_policy": "customer_facing_price_is_final",
     }
     _configure_stripe()
+    tax_params = _checkout_tax_params(price)
     try:
         session = stripe.checkout.Session.create(
             mode="subscription",
@@ -1038,6 +1081,7 @@ def create_public_checkout_session(
             metadata=metadata,
             subscription_data={"metadata": metadata},
             allow_promotion_codes=True,
+            **tax_params,
         )
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Stripe Checkout could not be created: {exc}") from exc
@@ -1151,7 +1195,10 @@ def create_checkout_session(payload: CheckoutRequest, user: User = Depends(get_c
         "fast_billing_interval": interval,
         "fast_sport": requested_sports[0],
         "fast_sports": ",".join(requested_sports),
+        "fast_vat_enabled": "1" if settings.vat_enabled else "0",
+        "fast_price_policy": "customer_facing_price_is_final",
     }
+    tax_params = _checkout_tax_params(price)
     params = {
         "mode": "subscription",
         "line_items": [{"price": str(_obj_get(price, "id")), "quantity": 1}],
@@ -1164,6 +1211,7 @@ def create_checkout_session(payload: CheckoutRequest, user: User = Depends(get_c
         "metadata": metadata,
         "subscription_data": {"metadata": metadata},
         "allow_promotion_codes": True,
+        **tax_params,
     }
     if plan.trial_days > 0:
         params["subscription_data"]["trial_period_days"] = plan.trial_days
