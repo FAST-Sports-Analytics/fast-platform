@@ -5,6 +5,9 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
+from app.core.email import EmailDeliveryError, branded_action_email, send_email
+
 from app.models import (
     AuditLog,
     BillingWebhookEvent,
@@ -22,6 +25,7 @@ from app.models import (
 )
 
 RETENTION_DAYS = 31
+settings = get_settings()
 
 
 def _utc(value: datetime | None) -> datetime | None:
@@ -64,6 +68,92 @@ def _retention_audit(
     )
 
 
+
+def _retention_contact(db: Session, organisation: Organisation) -> tuple[str, str]:
+    email = str(organisation.contact_email or "").strip().lower()
+    admin = db.scalar(
+        select(User).where(
+            User.organisation_id == organisation.id,
+            User.role == "administrator",
+            User.status.in_(["active", "invited", "suspended"]),
+        ).order_by(User.id)
+    )
+    if not email and admin:
+        email = str(admin.retention_email or admin.email or "").strip().lower()
+    name = str((admin.full_name if admin else "") or organisation.contact_name or organisation.retention_name or organisation.name or "FAST customer").strip()
+    return email, name
+
+
+def _send_retention_notice(
+    db: Session,
+    organisation: Organisation,
+    *,
+    reason: str,
+    purge_at: datetime,
+) -> None:
+    """Best-effort customer notice when FAST starts a 31-day recovery period."""
+    email, contact_name = _retention_contact(db, organisation)
+    if not email:
+        return
+
+    clean_reason = str(reason or "").strip().lower()
+    purge_label = purge_at.astimezone(timezone.utc).strftime("%d %B %Y at %H:%M UTC")
+
+    if clean_reason in {"subscription_ended", "payment_grace_expired"}:
+        subject = "Your FAST subscription has ended"
+        heading = "Your FAST subscription has ended"
+        intro = (
+            f"Hello {contact_name}. Your organisation's paid FAST subscription has ended "
+            "and licensed FAST product access has been removed."
+        )
+        detail = (
+            f"Your organisation's operational data is now in FAST's 31-day recovery period "
+            f"and is scheduled for permanent deletion on {purge_label}. "
+            "If you reactivate before that date, the scheduled deletion will be cancelled."
+        )
+        action_label = "View FAST account"
+    else:
+        subject = "FAST account deletion scheduled"
+        heading = "Your FAST account deletion is scheduled"
+        intro = (
+            f"Hello {contact_name}. FAST has received the request to delete your customer account."
+        )
+        detail = (
+            f"Your retained operational customer data is scheduled for permanent deletion on "
+            f"{purge_label}, after the 31-day recovery period."
+        )
+        action_label = "FAST Sports Analytics"
+
+    text_body, html_body = branded_action_email(
+        heading=heading,
+        intro=intro,
+        action_label=action_label,
+        action_url=f"{settings.public_app_url.rstrip('/')}/account",
+        expiry_text=detail,
+        footer_text=(
+            "This is an automated FAST data-retention notice. "
+            "For assistance contact support@fastsportsanalytics.com."
+        ),
+    )
+    try:
+        send_email(to_email=email, subject=subject, text=text_body, html=html_body)
+        _retention_audit(
+            db,
+            organisation,
+            action="deletion_notice_sent",
+            details=f"31-day retention notice sent to {email}; purge_at={purge_at.isoformat()}.",
+        )
+    except EmailDeliveryError as exc:
+        _retention_audit(
+            db,
+            organisation,
+            action="deletion_notice_failed",
+            details=(
+                f"31-day retention notice could not be delivered to {email}; "
+                f"purge_at={purge_at.isoformat()}; error={str(exc)[:240]}."
+            ),
+        )
+
 def schedule_organisation_deletion(
     db: Session,
     organisation: Organisation,
@@ -84,12 +174,24 @@ def schedule_organisation_deletion(
 
     # Never shorten an already-running retention period accidentally.
     current = _utc(organisation.deletion_scheduled_at)
+    newly_scheduled = not bool(current)
     if current and current <= scheduled_at:
         scheduled_at = current
     else:
         organisation.deletion_requested_at = requested_at
         organisation.deletion_scheduled_at = scheduled_at
         organisation.deletion_reason = str(reason or "customer_deletion")[:80]
+        newly_scheduled = True
+
+    # Capture/send the notice before an explicit account deletion releases the
+    # customer's public email identity.
+    if newly_scheduled:
+        _send_retention_notice(
+            db,
+            organisation,
+            reason=reason,
+            purge_at=scheduled_at,
+        )
 
     if release_identity:
         organisation.status = "pending_deletion"

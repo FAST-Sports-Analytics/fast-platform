@@ -2783,14 +2783,6 @@ async def stripe_webhook(request: Request) -> dict:
                             details=details,
                             external_event_id=external_event_id,
                         )
-                        _send_billing_email(
-                            db, matched_item,
-                            subject="Your FAST subscription has ended",
-                            heading="FAST subscription ended",
-                            intro="Your organisation's paid FAST subscription has ended and licensed product access is no longer active.",
-                            detail="Your organisation account and user records are retained. You can start a new FAST subscription from your account whenever you are ready.",
-                            action_label="View FAST plans",
-                        )
                     else:
                         details = (
                             f"Subscription state synchronised to {matched_item.status}; "
