@@ -182,7 +182,7 @@ def licence_payload(db: Session, user: User) -> dict | None:
         is_platform_admin=platform_admin,
         assigned_products=user.products_json,
     )
-    sports = filter_sports(licence.sports_json, assigned_sports=user.sports_json)
+    sports = filter_sports(licence.sports_json, assigned_sports=None if access_role == "administrator" else user.sports_json)
     return {
         "id": licence.id,
         "tier": licence.tier,

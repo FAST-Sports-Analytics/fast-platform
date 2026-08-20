@@ -1444,7 +1444,31 @@ def edit_licence_submit(
     licence.club_id = int(club_id) if owner_type == "club" and club_id.isdigit() else None
     licence.tier = tier.strip() or "FAST Professional"
     licence.products_json = json.dumps(sorted(set(products)))
-    licence.sports_json = json.dumps(sorted(set(sports)))
+
+    # The licence editor deliberately treats no sport checkboxes as
+    # "all currently available sports".  Persist the concrete sport keys
+    # rather than [] so /api/v1/licences/current and every desktop client
+    # receive an explicit, authoritative entitlement list.
+    selected_sports = sorted(set(sports))
+    if not selected_sports:
+        selected_sports = [
+            key for key in db.scalars(
+                select(Sport.key).where(Sport.active.is_(True)).order_by(Sport.name)
+            ).all()
+            if key
+        ]
+    licence.sports_json = json.dumps(selected_sports)
+
+    # Keep the owning organisation's advertised sports aligned with its
+    # active club licence when an administrator changes the licence manually.
+    # Per-user assignments remain intact for Analyst/Coach/Scout accounts.
+    if owner_type == "club" and licence.club_id:
+        owner_club = db.get(Club, licence.club_id)
+        if owner_club and owner_club.organisation_id:
+            owner_org = db.get(Organisation, owner_club.organisation_id)
+            if owner_org:
+                owner_org.sports_json = json.dumps(selected_sports)
+
     licence.max_devices = max(1, min(max_devices, 50))
     licence.max_users = max(1, min(max_users, 500)) if owner_type == "club" else 1
     licence.expires_at = expiry
