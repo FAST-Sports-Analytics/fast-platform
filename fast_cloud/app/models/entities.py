@@ -49,6 +49,7 @@ class User(Base):
     invitation_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     password_reset_token_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     password_reset_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    retention_email: Mapped[str | None] = mapped_column(String(320), nullable=True, index=True)
 
     licences: Mapped[list[Licence]] = relationship(back_populates="user", foreign_keys="Licence.user_id")
     club_memberships: Mapped[list[ClubMember]] = relationship(back_populates="user", cascade="all, delete-orphan")
@@ -77,6 +78,10 @@ class Organisation(Base):
     status: Mapped[str] = mapped_column(String(30), default="active")
     deployment_ring: Mapped[str] = mapped_column(String(30), default="production", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    deletion_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    deletion_scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    deletion_reason: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    retention_name: Mapped[str | None] = mapped_column(String(180), nullable=True)
 
     clubs: Mapped[list[Club]] = relationship(back_populates="organisation")
 

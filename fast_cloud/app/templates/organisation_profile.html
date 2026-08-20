@@ -1,9 +1,21 @@
 {% extends "base.html" %}
-{% block title %}{{ organisation.name }} · FAST Cloud{% if admin.organisation_id is none %}<section class="panel danger-zone"><h2>Delete organisation permanently</h2><p>This permanently removes the organisation, its direct users, clubs, licences and device allocations. An active Stripe subscription must be cancelled or expired first. Type the exact organisation name to confirm.</p><form method="post" action="/admin/organisations/{{ organisation.id }}/delete" onsubmit="return confirm('Permanently delete {{ organisation.name }} and its FAST Cloud data? This cannot be undone.');"><label>Organisation name<input name="confirm_name" autocomplete="off" required placeholder="{{ organisation.name }}"></label><button class="danger" type="submit">Delete organisation permanently</button></form></section>{% endif %}
-{% endblock %}
+{% block title %}{{ organisation.retention_name or organisation.name }} · FAST Cloud{% endblock %}
+
 {% block content %}
-<div class="page-heading"><div><h1>{{ organisation.name }}</h1><p>Organisation users, licensed access, devices and administrative history.</p></div></div>
+<div class="page-heading"><div><h1>{{ organisation.retention_name or organisation.name }}</h1><p>Organisation users, licensed access, devices and administrative history.</p></div></div>
 {% if message %}<div class="alert success">{{ message }}</div>{% endif %}{% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+{% if organisation.deletion_scheduled_at %}
+<section class="panel danger-zone">
+  <h2>31-day recovery period active</h2>
+  <p>This customer organisation is scheduled for permanent operational-data deletion on <strong>{{ organisation.deletion_scheduled_at.strftime('%d %b %Y %H:%M') }}</strong>. Reason: {{ (organisation.deletion_reason or 'customer deletion')|replace('_',' ')|title }}.</p>
+  <p>Where this was an explicit account deletion, the old public email identity has been released so a later website signup is treated as a new customer rather than reconnecting to this retained organisation.</p>
+  {% if admin.organisation_id is none %}
+  <form method="post" action="/admin/organisations/{{ organisation.id }}/restore" onsubmit="return confirm('Cancel the scheduled deletion and attempt to restore this organisation?');">
+    <button type="submit">Restore organisation</button>
+  </form>
+  {% endif %}
+</section>
+{% endif %}
 <section class="stats-grid"><article><span>Licensed users</span><strong>{{ seats_used }} / {{ seat_limit }}</strong></article><article><span>Active devices</span><strong>{{ active_devices }} / {{ device_capacity if device_capacity else '—' }}</strong></article><article><span>Tier</span><strong>{{ organisation.subscription_tier }}</strong></article><article><span>Status</span><strong>{{ organisation.status|title }}</strong></article></section>
 <section class="panel"><div class="panel-heading"><div><h2>Licence usage</h2><p>Expiry: {{ organisation.expires_at.strftime('%d %b %Y') if organisation.expires_at else 'No expiry set' }}</p></div></div><p><strong>Products:</strong> {{ licence_products|join(', ') if licence_products else 'None' }}</p><p><strong>Sports:</strong> {{ licence_sports|join(', ') if licence_sports else 'None' }}</p></section>
 <section class="panel"><div class="panel-heading"><div><h2>Licensed users</h2><p>Accounts currently using one of this organisation's {{ seat_limit }} licensed-user allocations. Each person is counted once, even when they also belong to a club.</p></div></div><div class="table-wrap"><table><thead><tr><th>Licence</th><th>User</th><th>Allocation</th><th>Organisation role / club memberships</th><th>Status</th></tr></thead><tbody>{% for holder in licensed_users %}<tr><td>Licence {{ loop.index }}</td><td><a href="/admin/users/{{ holder.user.id }}"><strong>{{ holder.user.full_name or 'Unnamed user' }}</strong></a><br><span class="muted">{{ holder.user.email }}</span></td><td>{% if holder.direct %}<span class="badge active">Organisation</span>{% endif %}{% for membership in holder.memberships %}<br><a href="/admin/clubs/{{ membership.club.id }}">{{ membership.club.name }}</a>{% endfor %}</td><td>{% if holder.direct %}{{ ('administrator' if holder.user.is_admin else holder.user.role)|title }}{% endif %}{% for membership in holder.memberships %}{% if holder.direct or not loop.first %}<br>{% endif %}<span class="muted">Club:</span> {{ membership.role|title }} · {{ membership.club.name }}{% endfor %}</td><td><span class="badge {{ holder.user.status }}">{{ holder.user.status|title }}</span></td></tr>{% else %}<tr><td colspan="5">No licensed users are currently allocated.</td></tr>{% endfor %}</tbody></table></div></section>
@@ -56,4 +68,14 @@
 })();
 </script>
 
+{% if admin.organisation_id is none and not organisation.deletion_scheduled_at %}
+<section class="panel danger-zone">
+  <h2>Schedule customer account deletion</h2>
+  <p>This does not immediately destroy customer data. The organisation enters FAST's 31-day recovery period. Its public email identity is released immediately, while operational customer data is retained until the scheduled purge date. An active Stripe subscription must be cancelled or expired first.</p>
+  <form method="post" action="/admin/organisations/{{ organisation.id }}/delete" onsubmit="return confirm('Schedule {{ organisation.name }} for deletion after the 31-day recovery period?');">
+    <label>Organisation name<input name="confirm_name" autocomplete="off" required placeholder="{{ organisation.name }}"></label>
+    <button class="danger" type="submit">Schedule deletion</button>
+  </form>
+</section>
+{% endif %}
 {% endblock %}

@@ -20,6 +20,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.core.seats import ALLOCATED_USER_STATUSES, allocated_user_count, effective_user_seat_limit, organisation_device_capacity
+from app.core.data_retention import clear_organisation_deletion, schedule_organisation_deletion
 from app.core.subscription_access import evaluate_subscription
 from app.core.entitlements import ROLE_PRODUCTS, normalise_product
 from app.core.security import (
@@ -624,10 +625,6 @@ def delete_user(
             status_code=303,
         )
 
-    # A public customer administrator represents the customer organisation,
-    # not merely an invited seat. Deleting that customer must remove the old
-    # operational organisation identity too; otherwise reusing the same email
-    # later can leave stale licences/clubs/content relationships behind.
     organisation = (
         db.get(Organisation, int(user.organisation_id))
         if user.organisation_id is not None
@@ -652,36 +649,42 @@ def delete_user(
         ):
             separator = "&" if "?" in return_to else "?"
             return RedirectResponse(
-                f"{return_to}{separator}error=This+customer+still+has+an+active+Stripe+subscription.+Cancel+or+expire+the+subscription+before+permanent+customer+deletion.",
+                f"{return_to}{separator}error=This+customer+still+has+an+active+Stripe+subscription.+Cancel+or+expire+the+subscription+before+account+deletion.",
                 status_code=303,
             )
 
-        label = user.email
-        organisation_label = organisation.name
+        original_label = organisation.name
+        purge_at = schedule_organisation_deletion(
+            db,
+            organisation,
+            reason="account_deleted",
+            starts_at=datetime.now(timezone.utc),
+            release_identity=True,
+        )
         _record_audit(
             db,
             admin,
-            "deleted",
+            "deletion_scheduled",
             "organisation",
             target_type="organisation",
             target_id=organisation.id,
-            target_label=organisation_label,
+            target_label=original_label,
             details=(
-                f"Customer organisation permanently deleted via administrator account {label}. "
-                "Users, memberships, clubs, licences and active device records removed. "
-                "A future public signup using the same email is treated as a new customer."
+                f"Customer account deletion requested. Operational data retained "
+                f"for the 31-day recovery period and scheduled for purge at "
+                f"{purge_at.isoformat()}. Public email identity released immediately."
             ),
         )
-        _hard_delete_customer_organisation(db, organisation)
         db.commit()
         separator = "&" if "?" in return_to else "?"
         return RedirectResponse(
-            f"{return_to}{separator}message=Customer+organisation+and+administrator+account+deleted+permanently.",
+            f"{return_to}{separator}message=Customer+account+scheduled+for+deletion+after+31+days.",
             status_code=303,
         )
 
-    # Non-administrator/invited users are seats within an organisation. Deleting
-    # one of them must not delete the customer organisation.
+    # Invited/non-administrator organisation users are seats, not the customer
+    # organisation itself. Their removal remains immediate and does not affect
+    # the organisation's retention lifecycle.
     label = user.email
     _record_audit(
         db,
@@ -691,11 +694,7 @@ def delete_user(
         target_type="user",
         target_id=user.id,
         target_label=label,
-        details=(
-            "Organisation user permanently deleted; licences, memberships and "
-            "active device records associated directly with that user removed. "
-            "The customer organisation was retained."
-        ),
+        details="Organisation user permanently deleted; customer organisation retained.",
     )
     _hard_delete_user(db, user)
     db.commit()
@@ -1093,21 +1092,96 @@ def delete_organisation(
     if not organisation:
         raise HTTPException(status_code=404, detail="Organisation not found")
     if confirm_name.strip() != organisation.name:
-        return RedirectResponse(f"/admin/organisations/{organisation_id}?error=Organisation+name+did+not+match.+Nothing+was+deleted.", status_code=303)
-
-    subscription = db.scalar(select(OrganisationSubscription).where(OrganisationSubscription.organisation_id == organisation.id))
-    if subscription and subscription.external_subscription_id and str(subscription.status or '').lower() not in {"cancelled", "expired"}:
         return RedirectResponse(
-            f"/admin/organisations/{organisation_id}?error=This+organisation+still+has+a+Stripe+subscription.+Cancel+or+expire+the+billing+subscription+before+permanent+deletion.",
+            f"/admin/organisations/{organisation_id}?error=Organisation+name+did+not+match.+Nothing+was+deleted.",
             status_code=303,
         )
 
-    label = organisation.name
-    _record_audit(db, admin, "deleted", "organisation", target_type="organisation", target_id=organisation.id, target_label=label, details="Organisation permanently deleted from FAST Cloud.")
+    subscription = db.scalar(
+        select(OrganisationSubscription).where(
+            OrganisationSubscription.organisation_id == organisation.id
+        )
+    )
+    if (
+        subscription
+        and subscription.external_subscription_id
+        and str(subscription.status or "").lower() not in {"cancelled", "expired"}
+    ):
+        return RedirectResponse(
+            f"/admin/organisations/{organisation_id}?error=This+organisation+still+has+a+Stripe+subscription.+Cancel+or+expire+the+billing+subscription+before+account+deletion.",
+            status_code=303,
+        )
 
-    _hard_delete_customer_organisation(db, organisation)
+    original_label = organisation.name
+    purge_at = schedule_organisation_deletion(
+        db,
+        organisation,
+        reason="account_deleted",
+        starts_at=datetime.now(timezone.utc),
+        release_identity=True,
+    )
+    _record_audit(
+        db,
+        admin,
+        "deletion_scheduled",
+        "organisation",
+        target_type="organisation",
+        target_id=organisation.id,
+        target_label=original_label,
+        details=(
+            f"Organisation account entered 31-day recovery period; "
+            f"permanent purge scheduled for {purge_at.isoformat()}."
+        ),
+    )
     db.commit()
-    return RedirectResponse("/admin/organisations?message=Organisation+deleted+permanently.", status_code=303)
+    return RedirectResponse(
+        f"/admin/organisations/{organisation_id}?message=Organisation+scheduled+for+deletion+after+31+days.",
+        status_code=303,
+    )
+
+
+@router.post("/organisations/{organisation_id}/restore")
+def restore_organisation(
+    organisation_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    admin = require_portal_admin(request, db)
+    if admin.organisation_id is not None:
+        raise HTTPException(status_code=403, detail="Only the FAST platform administrator can restore organisations")
+    organisation = db.get(Organisation, organisation_id)
+    if not organisation:
+        raise HTTPException(status_code=404, detail="Organisation not found")
+    if not organisation.deletion_scheduled_at:
+        return RedirectResponse(
+            f"/admin/organisations/{organisation_id}?message=No+scheduled+deletion+is+active.",
+            status_code=303,
+        )
+
+    restored = clear_organisation_deletion(
+        db,
+        organisation,
+        restore_identity=True,
+    )
+    _record_audit(
+        db,
+        admin,
+        "deletion_cancelled",
+        "organisation",
+        target_type="organisation",
+        target_id=organisation.id,
+        target_label=organisation.name,
+        details=(
+            "31-day deletion schedule cancelled by FAST platform administrator. "
+            "Original email identity was restored where no newer account uses it."
+        ),
+    )
+    db.commit()
+    message = "Organisation+restored+from+the+31-day+recovery+period." if restored else "No+scheduled+deletion+was+active."
+    return RedirectResponse(
+        f"/admin/organisations/{organisation_id}?message={message}",
+        status_code=303,
+    )
 
 
 

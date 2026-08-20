@@ -1,4 +1,5 @@
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
+import asyncio
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,6 +10,7 @@ from app.api.routes import admin_releases, admin_summary, auth, customer_downloa
 from app.admin_portal import router as admin_portal_router
 from app.releases import router as releases_router
 from app.core.config import get_settings
+from app.core.data_retention import purge_due_organisations
 from app.db.base import Base
 from app.db.migrations import migrate_schema
 from app.db.seed import seed_catalogue
@@ -40,7 +42,28 @@ async def lifespan(_: FastAPI):
     migrate_schema(engine)
     with SessionLocal() as db:
         seed_catalogue(db)
-    yield
+        purge_due_organisations(db)
+
+    async def retention_worker() -> None:
+        # Hourly is sufficient for a 31-day recovery policy and avoids coupling
+        # customer deletion to an administrator opening a page.
+        while True:
+            await asyncio.sleep(3600)
+            try:
+                with SessionLocal() as db:
+                    purge_due_organisations(db)
+            except Exception:
+                # Never take FAST Cloud offline because a retention pass failed.
+                # The next hourly pass retries; operational logs capture failures.
+                continue
+
+    retention_task = asyncio.create_task(retention_worker())
+    try:
+        yield
+    finally:
+        retention_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await retention_task
 
 
 app = FastAPI(

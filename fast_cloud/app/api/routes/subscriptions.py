@@ -16,6 +16,7 @@ from app.api.deps import get_current_user
 from app.core.config import get_settings
 from app.core.email import EmailDeliveryError, branded_action_email, send_email
 from app.core.rate_limit import RateLimit, client_address, limiter
+from app.core.data_retention import clear_organisation_deletion, schedule_organisation_deletion
 from app.core.security import generate_licence_code, hash_licence_code, hash_password, normalise_licence_code
 from app.db.session import SessionLocal, get_db
 from app.models import AuditLog, BillingWebhookEvent, Club, ClubMember, DeviceActivation, Licence, Organisation, OrganisationSubscription, Sport, SubscriptionPlan, User
@@ -569,6 +570,13 @@ def subscription_payload(db: Session, organisation_id: int, *, refresh_provider:
                 organisation = db.get(Organisation, organisation_id)
                 if organisation:
                     _revoke_subscription_entitlements(db, organisation, ended_at=period_end)
+                    schedule_organisation_deletion(
+                        db,
+                        organisation,
+                        reason="subscription_ended",
+                        starts_at=period_end,
+                        release_identity=False,
+                    )
                 item.updated_at = datetime.now(timezone.utc)
 
             # Payment-failure grace must use Stripe provider time as well. Test
@@ -589,6 +597,13 @@ def subscription_payload(db: Session, organisation_id: int, *, refresh_provider:
                 organisation = db.get(Organisation, organisation_id)
                 if organisation:
                     _revoke_subscription_entitlements(db, organisation, ended_at=grace_end)
+                    schedule_organisation_deletion(
+                        db,
+                        organisation,
+                        reason="payment_grace_expired",
+                        starts_at=grace_end,
+                        release_identity=False,
+                    )
                 item.updated_at = datetime.now(timezone.utc)
 
             # get_db() does not auto-commit on request completion. Persist the
@@ -617,6 +632,13 @@ def subscription_payload(db: Session, organisation_id: int, *, refresh_provider:
                 organisation = db.get(Organisation, organisation_id)
                 if organisation:
                     _revoke_subscription_entitlements(db, organisation, ended_at=period_end)
+                    schedule_organisation_deletion(
+                        db,
+                        organisation,
+                        reason="subscription_ended",
+                        starts_at=period_end,
+                        release_identity=False,
+                    )
                 item.updated_at = datetime.now(timezone.utc)
                 db.commit()
             # Otherwise keep Organisation Management available if Stripe is
@@ -2521,6 +2543,9 @@ def _sync_stripe_subscription(
     else:
         item.current_period_ends_at = period_end
     item.updated_at = datetime.now(timezone.utc)
+    if item.status in {"active", "trial", "grace_period", "past_due"} and organisation.deletion_scheduled_at:
+        clear_organisation_deletion(db, organisation)
+
     if effective_plan:
         organisation.subscription_tier = effective_plan.name
         # Stripe quantity is the paid capacity multiplier. Store the resulting
@@ -2743,7 +2768,14 @@ async def stripe_webhook(request: Request) -> dict:
                         terminal_org = db.get(Organisation, matched_item.organisation_id)
                         if terminal_org:
                             _revoke_subscription_entitlements(db, terminal_org, ended_at=terminal_end)
-                        details = "Stripe subscription deleted; FAST paid access and licence entitlements revoked."
+                            schedule_organisation_deletion(
+                                db,
+                                terminal_org,
+                                reason="subscription_ended",
+                                starts_at=terminal_end,
+                                release_identity=False,
+                            )
+                        details = "Stripe subscription deleted; FAST paid access and licence entitlements revoked. Customer data scheduled for deletion after the 31-day recovery period."
                         _record_subscription_billing_audit(
                             db,
                             matched_item,
