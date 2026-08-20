@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import os
 
 import stripe
 
@@ -28,6 +29,15 @@ from app.models import (
 
 RETENTION_DAYS = 31
 settings = get_settings()
+
+
+def _retention_stripe_secret_key() -> str:
+    """Resolve Stripe exactly as the billing routes do in production."""
+    return str(
+        settings.stripe_secret_key
+        or os.getenv("STRIPE_SECRET_KEY", "")
+        or ""
+    ).strip()
 
 
 def _utc(value: datetime | None) -> datetime | None:
@@ -464,7 +474,8 @@ def _stripe_test_clock_details_for_organisation(
     Live Stripe customers do not have a Test Clock, so all three naturally
     return no clock and FAST falls back to real UTC time.
     """
-    if not settings.stripe_secret_key:
+    stripe_secret_key = _retention_stripe_secret_key()
+    if not stripe_secret_key:
         return None, ""
 
     subscription = db.scalar(
@@ -481,7 +492,7 @@ def _stripe_test_clock_details_for_organisation(
         return None, ""
 
     try:
-        stripe.api_key = settings.stripe_secret_key
+        stripe.api_key = stripe_secret_key
         test_clock_id = ""
 
         # A live/cancelled subscription may still be retrievable and is the most
@@ -587,7 +598,7 @@ def _stripe_test_clock_resolution_diagnostics(
 ) -> dict:
     """Expose each sandbox Test Clock resolution attempt for admin diagnostics."""
     result = {
-        "stripe_configured": bool(settings.stripe_secret_key),
+        "stripe_configured": bool(_retention_stripe_secret_key()),
         "subscription_id": None,
         "customer_id": None,
         "subscription_lookup": {"attempted": False, "test_clock_id": None, "error": None},
@@ -612,7 +623,7 @@ def _stripe_test_clock_resolution_diagnostics(
     subscription_id = str(subscription.external_subscription_id or "").strip()
     result["customer_id"] = customer_id or None
     result["subscription_id"] = subscription_id or None
-    stripe.api_key = settings.stripe_secret_key
+    stripe.api_key = stripe_secret_key
     clock_id = ""
 
     if subscription_id:
