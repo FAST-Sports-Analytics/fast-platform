@@ -3,6 +3,7 @@ from sqlalchemy import select
 from app.core.config import get_settings
 from app.core.security import hash_password
 from app.db.base import Base
+from app.db.migrations import migrate_schema
 from app.db.session import SessionLocal, engine
 from app.models import User
 
@@ -17,6 +18,9 @@ def main() -> None:
         print(f"Migrating invalid development administrator email {admin_email} -> {VALID_DEFAULT_ADMIN}")
         admin_email = VALID_DEFAULT_ADMIN
     Base.metadata.create_all(bind=engine)
+    # The bootstrap runs before FastAPI's lifespan on Railway. Existing
+    # databases therefore need schema upgrades here before ORM queries.
+    migrate_schema(engine)
     with SessionLocal() as db:
         old = db.scalar(select(User).where(User.email == OLD_ADMIN))
         existing = db.scalar(select(User).where(User.email == admin_email))

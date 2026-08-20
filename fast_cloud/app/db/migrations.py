@@ -40,6 +40,9 @@ def migrate_schema(engine: Engine) -> None:
                 connection.execute(text("ALTER TABLE users ADD COLUMN password_reset_expires_at DATETIME"))
             if "retention_email" not in user_columns:
                 connection.execute(text("ALTER TABLE users ADD COLUMN retention_email VARCHAR(320)"))
+            connection.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_users_retention_email ON users (retention_email)"
+            ))
             # ``is_admin`` is reserved for platform-wide FAST administrators.
             # Older builds also set it for organisation administrators; retain
             # their role while removing unintended global Cloud Admin access.
@@ -62,8 +65,8 @@ def migrate_schema(engine: Engine) -> None:
             "secondary_colour": "VARCHAR(16) NOT NULL DEFAULT '#151A1D'",
             "accent_colour": "VARCHAR(16) NOT NULL DEFAULT '#19D978'",
             "deployment_ring": "VARCHAR(30) NOT NULL DEFAULT 'production'",
-            "deletion_requested_at": "DATETIME",
-            "deletion_scheduled_at": "DATETIME",
+            "deletion_requested_at": "TIMESTAMP WITH TIME ZONE",
+            "deletion_scheduled_at": "TIMESTAMP WITH TIME ZONE",
             "deletion_reason": "VARCHAR(80)",
             "retention_name": "VARCHAR(180)",
         }
@@ -71,6 +74,14 @@ def migrate_schema(engine: Engine) -> None:
             for name, definition in organisation_additions.items():
                 if name not in organisation_columns:
                     connection.execute(text(f"ALTER TABLE organisations ADD COLUMN {name} {definition}"))
+            connection.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_organisations_deletion_requested_at "
+                "ON organisations (deletion_requested_at)"
+            ))
+            connection.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_organisations_deletion_scheduled_at "
+                "ON organisations (deletion_scheduled_at)"
+            ))
             connection.execute(text("UPDATE organisations SET subscription_tier='FAST Professional' WHERE subscription_tier IS NULL OR subscription_tier=''"))
             connection.execute(text("UPDATE organisations SET sports_json='[]' WHERE sports_json IS NULL OR sports_json=''"))
             connection.execute(text("UPDATE organisations SET max_seats=1 WHERE max_seats IS NULL OR max_seats < 1"))
