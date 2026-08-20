@@ -20,6 +20,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.core.seats import ALLOCATED_USER_STATUSES, allocated_user_count, effective_user_seat_limit, organisation_device_capacity
+from app.core.subscription_access import evaluate_subscription
 from app.core.entitlements import ROLE_PRODUCTS, normalise_product
 from app.core.security import (
     create_admin_portal_token,
@@ -2685,7 +2686,7 @@ def subscriptions_page(request: Request, db: Session = Depends(get_db)):
     organisations = db.scalars(select(Organisation).order_by(Organisation.name)).all()
 
     # The owner subscription table must reflect Stripe's authoritative state,
-    # including Test Clock time.  Without this explicit refresh the customer
+    # including Test Clock time. Without this explicit refresh the customer
     # account can already be cancelled/expired while this admin table still
     # displays a stale Active or Grace Period row until another webhook/request
     # happens to materialise the state.
@@ -2703,12 +2704,104 @@ def subscriptions_page(request: Request, db: Session = Depends(get_db)):
             # unreachable. The last successfully persisted state remains visible.
             pass
 
-    subscriptions = db.scalars(select(OrganisationSubscription).order_by(OrganisationSubscription.id.desc())).all()
+    subscriptions = db.scalars(
+        select(OrganisationSubscription).order_by(OrganisationSubscription.id.desc())
+    ).all()
+
+    # Human-facing Stripe diagnostics. BillingWebhookEvent is the verified,
+    # persisted provider delivery log; AuditLog is the business/audit history.
+    # Showing both makes it possible to distinguish "Stripe never delivered",
+    # "FAST received but could not match", and "FAST processed successfully".
+    recent_webhooks = db.scalars(
+        select(BillingWebhookEvent)
+        .order_by(BillingWebhookEvent.created_at.desc(), BillingWebhookEvent.id.desc())
+        .limit(100)
+    ).all()
+
+    billing_diagnostics = []
+    for item in subscriptions:
+        organisation = item.organisation
+        if not organisation:
+            continue
+
+        last_event = db.scalar(
+            select(BillingWebhookEvent)
+            .where(
+                or_(
+                    BillingWebhookEvent.organisation_id == organisation.id,
+                    (
+                        BillingWebhookEvent.external_subscription_id
+                        == item.external_subscription_id
+                    )
+                    if item.external_subscription_id
+                    else False,
+                    (
+                        BillingWebhookEvent.external_customer_id
+                        == item.external_customer_id
+                    )
+                    if item.external_customer_id
+                    else False,
+                )
+            )
+            .order_by(BillingWebhookEvent.created_at.desc(), BillingWebhookEvent.id.desc())
+            .limit(1)
+        )
+
+        seat_limit = effective_user_seat_limit(db, organisation)
+        seats_used = allocated_user_count(db, organisation.id)
+        device_limit = max(
+            int(getattr(item.plan, "max_devices", 0) or 0),
+            int(organisation_device_capacity(organisation) or 0),
+        )
+        active_device_ids = set()
+        for club in organisation.clubs:
+            for licence in club.licences:
+                for activation in licence.device_activations:
+                    if activation.active:
+                        active_device_ids.add(activation.id)
+        devices_used = len(active_device_ids)
+
+        access = evaluate_subscription(item)
+        status = str(item.status or "").lower()
+        if status == "active":
+            payment_state = "Paid / active"
+        elif status in {"past_due", "grace_period"}:
+            payment_state = "Payment overdue / grace"
+        elif status in {"cancelled", "expired"}:
+            payment_state = "Ended"
+        elif status == "trial":
+            payment_state = "Trial"
+        else:
+            payment_state = str(item.status or "Unknown").replace("_", " ").title()
+
+        billing_diagnostics.append({
+            "item": item,
+            "last_event": last_event,
+            "event_type": last_event.event_type if last_event else "No Stripe event recorded",
+            "payment_state": payment_state,
+            "seat_limit": seat_limit,
+            "seats_used": seats_used,
+            "seat_over_by": max(0, seats_used - seat_limit),
+            "device_limit": device_limit,
+            "devices_used": devices_used,
+            "device_over_by": max(0, devices_used - device_limit) if device_limit else 0,
+            "access": access,
+        })
+
+    stripe_secret = str(getattr(settings, "stripe_secret_key", "") or "")
+    billing_test_mode = stripe_secret.startswith("sk_test_")
+
     return templates.TemplateResponse(request, "subscriptions.html", {
-        "admin": admin, "plans": plans, "organisations": organisations, "subscriptions": subscriptions,
+        "admin": admin,
+        "plans": plans,
+        "organisations": organisations,
+        "subscriptions": subscriptions,
         "active_count": sum(1 for item in subscriptions if item.status == "active"),
         "trial_count": sum(1 for item in subscriptions if item.status == "trial"),
         "risk_count": sum(1 for item in subscriptions if item.status in {"past_due", "grace_period"}),
+        "billing_diagnostics": billing_diagnostics,
+        "recent_webhooks": recent_webhooks,
+        "billing_test_mode": billing_test_mode,
     })
 
 
