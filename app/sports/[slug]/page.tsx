@@ -3,9 +3,26 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { CTA } from "../../components/CTA";
 import { PageShell } from "../../components/PageShell";
+import { ProductScreenshot } from "../../components/ProductScreenshot";
 import { sports } from "../../components/site-data";
 
 type Props = { params: Promise<{ slug: string }> };
+
+const sportTemplateScreenshots: Partial<Record<string, string>> = {
+  "football": "/sport-screenshots/football.webp",
+  "futsal": "/sport-screenshots/futsal.webp",
+  "rugby-union": "/sport-screenshots/rugby-union.webp",
+  "rugby-league": "/sport-screenshots/rugby-league.webp",
+  "basketball": "/sport-screenshots/basketball.webp",
+  "field-hockey": "/sport-screenshots/field-hockey.webp",
+  "ice-hockey": "/sport-screenshots/ice-hockey.webp",
+  "netball": "/sport-screenshots/netball.webp",
+  "volleyball": "/sport-screenshots/volleyball.webp",
+  "handball": "/sport-screenshots/handball.webp",
+  "american-football": "/sport-screenshots/american-football.webp",
+  "tennis": "/sport-screenshots/tennis.webp",
+  "baseball": "/sport-screenshots/baseball.webp",
+};
 
 export function generateStaticParams() {
   return sports.map((sport) => ({ slug: sport.slug }));
@@ -25,6 +42,7 @@ export default async function SportPage({ params }: Props) {
   const { slug } = await params;
   const sport = sports.find((item) => item.slug === slug);
   if (!sport) notFound();
+  const templateScreenshot = sportTemplateScreenshots[sport.slug];
 
   return <PageShell>
     <section className="page-hero split-hero">
@@ -32,6 +50,19 @@ export default async function SportPage({ params }: Props) {
       <div className="product-visual sport-visual"><small>Sport-specific workflow</small><strong>{sport.name}</strong><div className="visual-lines"><i/><i/><i/><i/></div></div>
     </section>
     <section className="content-section"><div className="section-heading compact"><p className="eyebrow">Designed for the game</p><h2>Sport-specific context without a disconnected product.</h2><p>FAST adapts match structure, players and coding logic to {sport.name.toLowerCase()}, while retaining the same analysis, review and cloud workflow across the platform.</p></div><div className="feature-cards">{sport.highlights.map((highlight,index)=><article key={highlight}><span>{String(index+1).padStart(2,"0")}</span><h3>{highlight}</h3><p>Built into the shared FAST environment so analysts and coaches can move from match context to useful video insight without unnecessary friction.</p></article>)}</div></section>
+    {templateScreenshot && <section className="content-section">
+      <div className="section-heading compact">
+        <p className="eyebrow">Built for {sport.name}</p>
+        <h2>A coding workspace shaped around {sport.name.toLowerCase()}.</h2>
+        <p>See the current FAST Analysis default {sport.name.toLowerCase()} template, with sport-specific coding actions, match context, live statistics and the relevant formation, lineup or playing-area view.</p>
+      </div>
+      <ProductScreenshot
+        src={templateScreenshot}
+        label={`FAST Analysis · ${sport.name} template`}
+        alt={`FAST Analysis ${sport.name} coding template and live analysis workspace`}
+        caption={`Current FAST Analysis ${sport.name} workspace. Select the image to enlarge.`}
+      />
+    </section>}
     <section className="workflow-band"><p className="eyebrow">Connected products</p><h2>Code in FAST Analysis. Review in FAST Viewer. Control access through FAST Cloud.</h2><Link href="/platform">Explore the FAST platform <span>→</span></Link></section>
     <CTA title={`Build a clearer ${sport.name.toLowerCase()} analysis workflow.`}/>
   </PageShell>;
