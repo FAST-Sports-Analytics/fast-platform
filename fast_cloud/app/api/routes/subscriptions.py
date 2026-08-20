@@ -273,6 +273,23 @@ def _provision_public_checkout(db: Session, session, subscription) -> None:
     db.add(admin_user)
     db.flush()
 
+    db.add(AuditLog(
+        admin_user_id=admin_user.id,
+        action="public_checkout_legal_acceptance",
+        category="account_onboarding",
+        target_type="organisation",
+        target_id=organisation.id,
+        target_label=organisation.name,
+        details=(
+            "Legal acceptance captured before Stripe checkout: "
+            f"terms={str(_obj_get(session_metadata, 'fast_terms_version', '') or '')}; "
+            f"dpa={str(_obj_get(session_metadata, 'fast_dpa_version', '') or '')}; "
+            f"privacy_notice={str(_obj_get(session_metadata, 'fast_privacy_version', '') or '')}; "
+            f"administrator_18_plus={str(_obj_get(session_metadata, 'fast_admin_18_plus', '') or '')}; "
+            f"accepted_at={str(_obj_get(session_metadata, 'fast_legal_accepted_at', '') or '')}."
+        ),
+    ))
+
     item = OrganisationSubscription(
         organisation_id=organisation.id,
         plan_id=plan.id,
@@ -996,6 +1013,12 @@ class PublicCheckoutRequest(BaseModel):
     # ``sport`` is retained for backwards compatibility with older website builds.
     sport: str = Field(default="football", max_length=80)
     sports: list[str] = Field(default_factory=list, max_length=5)
+    accept_terms: bool = False
+    accept_dpa: bool = False
+    confirm_admin_age: bool = False
+    terms_version: str = Field(default="2026-08-20", max_length=40)
+    dpa_version: str = Field(default="2026-08-20", max_length=40)
+    privacy_version: str = Field(default="2026-08-20", max_length=40)
 
 
 @router.post("/public-checkout")
@@ -1014,6 +1037,14 @@ def create_public_checkout_session(
     email = _normalise_email(payload.contact_email)
     organisation_name = payload.organisation_name.strip()
     contact_name = payload.contact_name.strip()
+    if not payload.confirm_admin_age:
+        raise HTTPException(status_code=422, detail="The organisation administrator must confirm they are at least 18")
+    if not payload.accept_terms:
+        raise HTTPException(status_code=422, detail="You must accept the FAST Terms of Service before checkout")
+    if not payload.accept_dpa:
+        raise HTTPException(status_code=422, detail="You must accept the FAST Data Processing Agreement before checkout")
+    if payload.terms_version != "2026-08-20" or payload.dpa_version != "2026-08-20":
+        raise HTTPException(status_code=409, detail="The FAST legal terms have changed. Refresh the page and review the current documents.")
     # Paid public checkout must carry an explicit sport selection from the
     # current website. Do not silently fall back to Football for an older/stale
     # frontend build: that can create a paid organisation with the wrong sports.
@@ -1066,6 +1097,11 @@ def create_public_checkout_session(
         "fast_contact_email": email,
         "fast_sport": requested_sports[0],
         "fast_sports": ",".join(requested_sports),
+        "fast_terms_version": payload.terms_version,
+        "fast_dpa_version": payload.dpa_version,
+        "fast_privacy_version": payload.privacy_version,
+        "fast_admin_18_plus": "1" if payload.confirm_admin_age else "0",
+        "fast_legal_accepted_at": datetime.now(timezone.utc).isoformat(),
         "fast_vat_enabled": "1" if settings.vat_enabled else "0",
         "fast_price_policy": "customer_facing_price_is_final",
     }

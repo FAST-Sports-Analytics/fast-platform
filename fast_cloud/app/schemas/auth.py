@@ -8,6 +8,11 @@ class RegisterRequest(BaseModel):
     organisation_name: str = Field(min_length=2, max_length=180)
     country: str | None = Field(default=None, max_length=100)
     accept_terms: bool = False
+    accept_dpa: bool = False
+    confirm_admin_age: bool = False
+    terms_version: str = Field(default="2026-08-20", max_length=40)
+    dpa_version: str = Field(default="2026-08-20", max_length=40)
+    privacy_version: str = Field(default="2026-08-20", max_length=40)
 
 
 class LoginRequest(BaseModel):

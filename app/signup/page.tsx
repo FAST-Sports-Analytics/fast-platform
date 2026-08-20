@@ -5,7 +5,7 @@ import Link from "next/link";
 import { FormEvent, useState } from "react";
 
 export default function Signup() {
-  const [form, setForm] = useState({ full_name: "", email: "", organisation_name: "", country: "United Kingdom", password: "", confirm: "", accept_terms: false });
+  const [form, setForm] = useState({ full_name: "", email: "", organisation_name: "", country: "United Kingdom", password: "", confirm: "", accept_terms: false, accept_dpa: false, confirm_admin_age: false });
   const [submitting, setSubmitting] = useState(false);
   const [message, setMessage] = useState("");
   const [complete, setComplete] = useState(false);
@@ -23,6 +23,8 @@ export default function Signup() {
         body: JSON.stringify({
           full_name: form.full_name, email: form.email, organisation_name: form.organisation_name,
           country: form.country, password: form.password, accept_terms: form.accept_terms,
+          accept_dpa: form.accept_dpa, confirm_admin_age: form.confirm_admin_age,
+          terms_version: "2026-08-20", dpa_version: "2026-08-20", privacy_version: "2026-08-20",
         }),
       });
       const data = await response.json().catch(() => ({}));
@@ -56,7 +58,10 @@ export default function Signup() {
           <label>Country<input value={form.country} onChange={e=>set("country",e.target.value)} autoComplete="country-name" required/></label>
           <label>Password<input type="password" minLength={10} value={form.password} onChange={e=>set("password",e.target.value)} autoComplete="new-password" required/><small>At least 10 characters.</small></label>
           <label>Confirm password<input type="password" minLength={10} value={form.confirm} onChange={e=>set("confirm",e.target.value)} autoComplete="new-password" required/></label>
-          <label className="auth-check"><input type="checkbox" checked={form.accept_terms} onChange={e=>set("accept_terms",e.target.checked)} required/><span>I agree to the <Link href="/terms">FAST Terms</Link> and <Link href="/privacy">Privacy Policy</Link>.</span></label>
+          <label className="auth-check"><input type="checkbox" checked={form.confirm_admin_age} onChange={e=>set("confirm_admin_age",e.target.checked)} required/><span>I confirm that I am at least 18 years old and authorised to create/manage this organisation's FAST account.</span></label>
+          <label className="auth-check"><input type="checkbox" checked={form.accept_terms} onChange={e=>set("accept_terms",e.target.checked)} required/><span>I agree on behalf of my organisation to the <Link href="/terms">FAST Terms of Service</Link>.</span></label>
+          <label className="auth-check"><input type="checkbox" checked={form.accept_dpa} onChange={e=>set("accept_dpa",e.target.checked)} required/><span>I agree on behalf of my organisation to the <Link href="/dpa">FAST Data Processing Agreement</Link> where FAST processes Customer Personal Data for us.</span></label>
+          <small>FAST's <Link href="/privacy">Privacy Notice</Link> explains how FAST handles personal information. It is provided for transparency and is not treated as consent to unnecessary processing.</small>
           {message && <p className="auth-error">{message}</p>}
           <button className="button button-primary" type="submit" disabled={submitting}>{submitting ? "Creating account…" : "Create account"}</button>
         </form>

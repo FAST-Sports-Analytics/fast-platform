@@ -138,6 +138,12 @@ export function PricingPlans() {
           contact_email: String(form.get("email") || ""),
           sport: selectedSports[0] || "football",
           sports: selectedSports,
+          accept_terms: form.get("accept_terms") === "on",
+          accept_dpa: form.get("accept_dpa") === "on",
+          confirm_admin_age: form.get("confirm_admin_age") === "on",
+          terms_version: "2026-08-20",
+          dpa_version: "2026-08-20",
+          privacy_version: "2026-08-20",
         }),
       });
       const data = await response.json().catch(() => ({}));
@@ -221,6 +227,10 @@ export function PricingPlans() {
               })}
             </div>
           </fieldset>
+          <label className="auth-check"><input name="confirm_admin_age" type="checkbox" required/><span>I confirm that I am at least 18 years old and authorised to subscribe for this organisation.</span></label>
+          <label className="auth-check"><input name="accept_terms" type="checkbox" required/><span>I agree on behalf of my organisation to the <Link href="/terms">FAST Terms of Service</Link>.</span></label>
+          <label className="auth-check"><input name="accept_dpa" type="checkbox" required/><span>I agree on behalf of my organisation to the <Link href="/dpa">FAST Data Processing Agreement</Link> where applicable.</span></label>
+          <small>See the <Link href="/privacy">Privacy Notice</Link> for how FAST handles personal information.</small>
           {message && <p className="checkout-error">{message}</p>}
           <button className="button button-primary" type="submit" disabled={submitting}>{submitting ? "Opening Stripe…" : `Continue to Stripe · ${checkout.interval === "monthly" ? money(checkout.plan.monthly_price_pence) : money(checkout.plan.annual_price_pence)}`}</button>
           <small>You will create your FAST administrator password from the secure activation email sent after successful checkout.</small>

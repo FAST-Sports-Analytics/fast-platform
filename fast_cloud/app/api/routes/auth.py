@@ -211,8 +211,14 @@ def register(payload: RegisterRequest, request: Request, db: Session = Depends(g
         f"public-register:{client_address(request)}",
         RateLimit(settings.token_submit_rate_attempts, settings.token_submit_rate_window_seconds),
     )
+    if not payload.confirm_admin_age:
+        raise HTTPException(status_code=422, detail="The organisation administrator must confirm they are at least 18")
     if not payload.accept_terms:
-        raise HTTPException(status_code=422, detail="You must accept the FAST Terms and Privacy Policy")
+        raise HTTPException(status_code=422, detail="You must accept the FAST Terms of Service")
+    if not payload.accept_dpa:
+        raise HTTPException(status_code=422, detail="You must accept the FAST Data Processing Agreement")
+    if payload.terms_version != "2026-08-20" or payload.dpa_version != "2026-08-20":
+        raise HTTPException(status_code=409, detail="The FAST legal terms have changed. Refresh the page and review the current documents.")
     email = payload.email.lower().strip()
     organisation_name = payload.organisation_name.strip()
     full_name = payload.full_name.strip()
@@ -260,7 +266,12 @@ def register(payload: RegisterRequest, request: Request, db: Session = Depends(g
         target_type="organisation",
         target_id=organisation.id,
         target_label=organisation.name,
-        details="Public organisation administrator account created; email verification required before sign-in.",
+        details=(
+            "Public organisation administrator account created; email verification required before sign-in. "
+            f"Legal acceptance recorded: terms={payload.terms_version}; dpa={payload.dpa_version}; "
+            f"privacy_notice={payload.privacy_version}; administrator_18_plus={bool(payload.confirm_admin_age)}; "
+            f"accepted_at={datetime.now(timezone.utc).isoformat()}."
+        ),
     ))
     db.commit()
     db.refresh(user)
