@@ -2,6 +2,7 @@
 
 import Image from "next/image";
 import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 
 type ProductScreenshotProps = {
   src: string;
@@ -38,11 +39,14 @@ export function ProductScreenshot({ src, alt, label, caption, priority = false, 
       </button>
       {caption && <figcaption>{caption}</figcaption>}
     </figure>
-    {open && <div className="screenshot-modal" role="dialog" aria-modal="true" aria-label={label} onClick={() => setOpen(false)}>
-      <button type="button" className="screenshot-modal-close" onClick={() => setOpen(false)} aria-label="Close enlarged screenshot">Close ×</button>
-      <div className="screenshot-modal-image" onClick={(event) => event.stopPropagation()}>
-        <Image src={src} alt={alt} fill sizes="96vw" priority/>
-      </div>
-    </div>}
+    {open && typeof document !== "undefined" && createPortal(
+      <div className="screenshot-modal" role="dialog" aria-modal="true" aria-label={label} onClick={() => setOpen(false)}>
+        <button type="button" className="screenshot-modal-close" onClick={() => setOpen(false)} aria-label="Close enlarged screenshot">Close ×</button>
+        <div className="screenshot-modal-image" onClick={(event) => event.stopPropagation()}>
+          <Image src={src} alt={alt} fill sizes="96vw" priority/>
+        </div>
+      </div>,
+      document.body
+    )}
   </>;
 }
