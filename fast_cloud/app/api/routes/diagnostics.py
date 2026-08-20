@@ -9,9 +9,10 @@ from fastapi import APIRouter, Body, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, require_admin
 from app.db.session import get_db
 from app.models import CrashReport, DeviceActivation, User
+from app.core.data_retention import purge_due_organisations, retention_diagnostics
 
 router = APIRouter(prefix="/diagnostics", tags=["Diagnostics"])
 
@@ -83,3 +84,25 @@ def submit_crash(
     db.commit()
     db.refresh(report)
     return {"status": "recorded", "incident_id": report.id, "fingerprint": fingerprint, "occurrences": report.occurrence_count}
+
+
+@router.get("/retention")
+def get_retention_diagnostics(
+    _: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Read-only view of FAST retention deadlines and the effective clock used."""
+    rows = retention_diagnostics(db)
+    return {"count": len(rows), "organisations": rows}
+
+
+@router.post("/retention/run")
+def run_retention_pass(
+    _: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Run one retention purge pass immediately using normal FAST time rules."""
+    before = retention_diagnostics(db)
+    purged = purge_due_organisations(db)
+    after = retention_diagnostics(db)
+    return {"purged": purged, "before": before, "after": after}

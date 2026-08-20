@@ -497,6 +497,37 @@ def _stripe_test_clock_now_for_organisation(
         return None
 
 
+
+def retention_diagnostics(db: Session) -> list[dict]:
+    """Return read-only retention timing diagnostics for administrator tooling."""
+    wall_clock_now = datetime.now(timezone.utc)
+    organisations = db.scalars(
+        select(Organisation)
+        .where(Organisation.deletion_scheduled_at.is_not(None))
+        .order_by(Organisation.deletion_scheduled_at)
+    ).all()
+    rows: list[dict] = []
+    for organisation in organisations:
+        scheduled_at = _utc(organisation.deletion_scheduled_at)
+        provider_now = _stripe_test_clock_now_for_organisation(db, organisation)
+        effective_now = provider_now or wall_clock_now
+        subscription = db.scalar(
+            select(OrganisationSubscription).where(
+                OrganisationSubscription.organisation_id == organisation.id
+            )
+        )
+        rows.append({
+            "organisation_id": organisation.id,
+            "organisation": organisation.retention_name or organisation.name,
+            "deletion_scheduled_at": scheduled_at.isoformat() if scheduled_at else None,
+            "real_utc_now": wall_clock_now.isoformat(),
+            "effective_now": effective_now.isoformat(),
+            "using_stripe_test_clock": provider_now is not None,
+            "stripe_customer_id": (subscription.external_customer_id if subscription else None),
+            "is_due": bool(scheduled_at and scheduled_at <= effective_now),
+        })
+    return rows
+
 def purge_due_organisations(
     db: Session,
     *,
