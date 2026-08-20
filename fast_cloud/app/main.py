@@ -158,15 +158,17 @@ def health() -> dict:
 
 
 @app.get("/ready")
-def readiness() -> dict:
-    """Deployment readiness probe: succeeds only when the database is reachable."""
-    try:
-        with engine.connect() as connection:
-            connection.execute(text("SELECT 1"))
-        return {"status": "ready", "service": settings.app_name, "version": "0.20.0a"}
-    except Exception:
-        from fastapi.responses import JSONResponse
-        return JSONResponse(
-            status_code=503,
-            content={"status": "not_ready", "service": settings.app_name, "version": "0.20.0a"},
-        )
+async def readiness() -> dict:
+    """Fast process-readiness probe for Railway.
+
+    Database availability is reported by /health.  Production startup already
+    validates and migrates the database before Uvicorn starts accepting traffic,
+    so the deployment probe must not perform a fresh database checkout that can
+    stall Railway's network healthcheck and prevent an otherwise healthy
+    container from ever going live.
+    """
+    return {
+        "status": "ready",
+        "service": settings.app_name,
+        "version": "0.20.0a",
+    }
