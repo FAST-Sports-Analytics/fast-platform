@@ -448,53 +448,118 @@ def _stripe_object_id(value) -> str:
     return str(getattr(value, "id", "") or "").strip()
 
 
-def _stripe_test_clock_now_for_organisation(
+def _stripe_test_clock_details_for_organisation(
     db: Session, organisation: Organisation
-) -> datetime | None:
-    """Return the sandbox Test Clock time for an organisation, when applicable.
+) -> tuple[datetime | None, str]:
+    """Return sandbox Test Clock time + id for an organisation when available.
 
-    Production customers do not have a Stripe Test Clock, so this returns None
-    and retention uses normal UTC wall-clock time. During sandbox acceptance tests
-    it lets FAST's own retention worker observe the same simulated date as Stripe.
+    A cancelled Stripe subscription can stop exposing ``test_clock`` through the
+    Customer object even though its invoices were created on that Test Clock.
+    For retention testing we therefore resolve the clock in this order:
+
+    1. Stored/retrievable Subscription object.
+    2. Customer object.
+    3. Latest invoice for the Stripe customer.
+
+    Live Stripe customers do not have a Test Clock, so all three naturally
+    return no clock and FAST falls back to real UTC time.
     """
     if not settings.stripe_secret_key:
-        return None
+        return None, ""
 
     subscription = db.scalar(
         select(OrganisationSubscription).where(
             OrganisationSubscription.organisation_id == organisation.id
         )
     )
-    customer_id = str(
-        (subscription.external_customer_id if subscription else None) or ""
-    ).strip()
-    if not customer_id:
-        return None
+    if not subscription:
+        return None, ""
+
+    customer_id = str(subscription.external_customer_id or "").strip()
+    subscription_id = str(subscription.external_subscription_id or "").strip()
+    if not customer_id and not subscription_id:
+        return None, ""
 
     try:
         stripe.api_key = settings.stripe_secret_key
-        customer = stripe.Customer.retrieve(customer_id)
-        # Stripe may return ``test_clock`` as either ``clock_...`` or an
-        # expanded TestClock object.  Converting an expanded object with str()
-        # produces a representation that is not a valid Stripe resource ID,
-        # causing the retention worker to silently fall back to wall-clock time.
-        test_clock_id = _stripe_object_id(getattr(customer, "test_clock", None))
-        if not test_clock_id and isinstance(customer, dict):
-            test_clock_id = _stripe_object_id(customer.get("test_clock"))
+        test_clock_id = ""
+
+        # A live/cancelled subscription may still be retrievable and is the most
+        # direct source when Stripe keeps the object available.
+        if subscription_id:
+            try:
+                remote_subscription = stripe.Subscription.retrieve(subscription_id)
+                test_clock_id = _stripe_object_id(
+                    getattr(remote_subscription, "test_clock", None)
+                )
+                if not test_clock_id and isinstance(remote_subscription, dict):
+                    test_clock_id = _stripe_object_id(
+                        remote_subscription.get("test_clock")
+                    )
+            except Exception:
+                test_clock_id = ""
+
+        # Customer is normally enough while the Test Clock relationship remains
+        # exposed by Stripe.
+        if not test_clock_id and customer_id:
+            try:
+                customer = stripe.Customer.retrieve(customer_id)
+                test_clock_id = _stripe_object_id(
+                    getattr(customer, "test_clock", None)
+                )
+                if not test_clock_id and isinstance(customer, dict):
+                    test_clock_id = _stripe_object_id(customer.get("test_clock"))
+            except Exception:
+                test_clock_id = ""
+
+        # Important cancellation fallback: invoices created under a Test Clock
+        # retain their ``test_clock`` reference even after the subscription has
+        # reached its terminal state. This lets the 31-day purge test continue
+        # to use Stripe's simulated time after cancellation.
+        if not test_clock_id and customer_id:
+            try:
+                invoices = stripe.Invoice.list(customer=customer_id, limit=10)
+                invoice_rows = list(getattr(invoices, "data", None) or [])
+                if not invoice_rows and isinstance(invoices, dict):
+                    invoice_rows = list(invoices.get("data") or [])
+                for invoice in invoice_rows:
+                    test_clock_id = _stripe_object_id(
+                        getattr(invoice, "test_clock", None)
+                    )
+                    if not test_clock_id and isinstance(invoice, dict):
+                        test_clock_id = _stripe_object_id(invoice.get("test_clock"))
+                    if test_clock_id:
+                        break
+            except Exception:
+                test_clock_id = ""
+
         if not test_clock_id:
-            return None
+            return None, ""
 
         test_clock = stripe.test_helpers.TestClock.retrieve(test_clock_id)
         frozen_time = getattr(test_clock, "frozen_time", None)
         if frozen_time is None and isinstance(test_clock, dict):
             frozen_time = test_clock.get("frozen_time")
         if not frozen_time:
-            return None
-        return datetime.fromtimestamp(int(frozen_time), tz=timezone.utc)
+            return None, test_clock_id
+
+        return (
+            datetime.fromtimestamp(int(frozen_time), tz=timezone.utc),
+            test_clock_id,
+        )
     except Exception:
-        # Retention must remain available even if Stripe is temporarily
-        # unreachable. The next hourly pass retries automatically.
-        return None
+        # Retention must remain available if Stripe is temporarily unreachable.
+        # The next hourly pass retries automatically.
+        return None, ""
+
+
+def _stripe_test_clock_now_for_organisation(
+    db: Session, organisation: Organisation
+) -> datetime | None:
+    provider_now, _clock_id = _stripe_test_clock_details_for_organisation(
+        db, organisation
+    )
+    return provider_now
 
 
 
@@ -509,7 +574,9 @@ def retention_diagnostics(db: Session) -> list[dict]:
     rows: list[dict] = []
     for organisation in organisations:
         scheduled_at = _utc(organisation.deletion_scheduled_at)
-        provider_now = _stripe_test_clock_now_for_organisation(db, organisation)
+        provider_now, test_clock_id = _stripe_test_clock_details_for_organisation(
+            db, organisation
+        )
         effective_now = provider_now or wall_clock_now
         subscription = db.scalar(
             select(OrganisationSubscription).where(
@@ -523,6 +590,7 @@ def retention_diagnostics(db: Session) -> list[dict]:
             "real_utc_now": wall_clock_now.isoformat(),
             "effective_now": effective_now.isoformat(),
             "using_stripe_test_clock": provider_now is not None,
+            "stripe_test_clock_id": test_clock_id or None,
             "stripe_customer_id": (subscription.external_customer_id if subscription else None),
             "is_due": bool(scheduled_at and scheduled_at <= effective_now),
         })
