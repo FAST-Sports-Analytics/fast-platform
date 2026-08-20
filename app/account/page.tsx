@@ -578,7 +578,9 @@ export default function AccountPage() {
               <article><small>Billing</small><strong>{subscription?.billing_interval ? subscription.billing_interval[0].toUpperCase() + subscription.billing_interval.slice(1) : "—"}</strong></article>
             </div>
             <div className="account-entitlements"><span>{subscription.plan.products.map(value => `FAST ${value[0].toUpperCase()}${value.slice(1)}`).join(" + ")}</span><span>{subscription.plan.cloud_storage_gb} GB cloud storage</span></div>
-          </> : <p>Your paid FAST access has ended. Choose a plan below to restore licensed applications and organisation entitlements.</p>}
+          </> : <p>{subscription?.status === "unconfigured"
+            ? "Your FAST account is ready. Choose a plan below to activate your licensed applications and organisation entitlements."
+            : "Your paid FAST access has ended. Choose a plan below to restore licensed applications and organisation entitlements."}</p>}
           <div className="account-actions">
             <Link className="button button-primary" href="/downloads">Downloads</Link>
             <Link className="button button-quiet" href="/organisation">Organisation Management</Link>
