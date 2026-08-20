@@ -582,6 +582,132 @@ def _stripe_test_clock_details_for_organisation(
         return None, ""
 
 
+def _stripe_test_clock_resolution_diagnostics(
+    db: Session, organisation: Organisation
+) -> dict:
+    """Expose each sandbox Test Clock resolution attempt for admin diagnostics."""
+    result = {
+        "stripe_configured": bool(settings.stripe_secret_key),
+        "subscription_id": None,
+        "customer_id": None,
+        "subscription_lookup": {"attempted": False, "test_clock_id": None, "error": None},
+        "customer_lookup": {"attempted": False, "test_clock_id": None, "error": None},
+        "invoice_lookup": {"attempted": False, "invoice_count": 0, "test_clock_id": None, "error": None},
+        "clock_enumeration": {"attempted": False, "clock_count": 0, "matched_clock_id": None, "errors": []},
+        "clock_retrieve": {"attempted": False, "frozen_time": None, "effective_now": None, "error": None},
+    }
+    if not settings.stripe_secret_key:
+        return result
+
+    subscription = db.scalar(
+        select(OrganisationSubscription).where(
+            OrganisationSubscription.organisation_id == organisation.id
+        )
+    )
+    if not subscription:
+        result["error"] = "No OrganisationSubscription row"
+        return result
+
+    customer_id = str(subscription.external_customer_id or "").strip()
+    subscription_id = str(subscription.external_subscription_id or "").strip()
+    result["customer_id"] = customer_id or None
+    result["subscription_id"] = subscription_id or None
+    stripe.api_key = settings.stripe_secret_key
+    clock_id = ""
+
+    if subscription_id:
+        item = result["subscription_lookup"]
+        item["attempted"] = True
+        try:
+            remote = stripe.Subscription.retrieve(subscription_id)
+            clock_id = _stripe_object_id(getattr(remote, "test_clock", None))
+            if not clock_id and isinstance(remote, dict):
+                clock_id = _stripe_object_id(remote.get("test_clock"))
+            item["test_clock_id"] = clock_id or None
+        except Exception as exc:
+            item["error"] = f"{type(exc).__name__}: {str(exc)[:500]}"
+
+    if not clock_id and customer_id:
+        item = result["customer_lookup"]
+        item["attempted"] = True
+        try:
+            customer = stripe.Customer.retrieve(customer_id)
+            clock_id = _stripe_object_id(getattr(customer, "test_clock", None))
+            if not clock_id and isinstance(customer, dict):
+                clock_id = _stripe_object_id(customer.get("test_clock"))
+            item["test_clock_id"] = clock_id or None
+        except Exception as exc:
+            item["error"] = f"{type(exc).__name__}: {str(exc)[:500]}"
+
+    if not clock_id and customer_id:
+        item = result["invoice_lookup"]
+        item["attempted"] = True
+        try:
+            invoices = stripe.Invoice.list(customer=customer_id, limit=10)
+            rows = list(getattr(invoices, "data", None) or [])
+            if not rows and isinstance(invoices, dict):
+                rows = list(invoices.get("data") or [])
+            item["invoice_count"] = len(rows)
+            for invoice in rows:
+                candidate = _stripe_object_id(getattr(invoice, "test_clock", None))
+                if not candidate and isinstance(invoice, dict):
+                    candidate = _stripe_object_id(invoice.get("test_clock"))
+                if candidate:
+                    clock_id = candidate
+                    item["test_clock_id"] = candidate
+                    break
+        except Exception as exc:
+            item["error"] = f"{type(exc).__name__}: {str(exc)[:500]}"
+
+    if not clock_id and customer_id:
+        item = result["clock_enumeration"]
+        item["attempted"] = True
+        try:
+            clocks = stripe.test_helpers.TestClock.list(limit=100)
+            rows = list(getattr(clocks, "data", None) or [])
+            if not rows and isinstance(clocks, dict):
+                rows = list(clocks.get("data") or [])
+            item["clock_count"] = len(rows)
+            for clock in rows:
+                candidate_clock_id = _stripe_object_id(clock)
+                if not candidate_clock_id:
+                    continue
+                try:
+                    customers = stripe.Customer.list(test_clock=candidate_clock_id, limit=100)
+                    customer_rows = list(getattr(customers, "data", None) or [])
+                    if not customer_rows and isinstance(customers, dict):
+                        customer_rows = list(customers.get("data") or [])
+                    if any(_stripe_object_id(row) == customer_id for row in customer_rows):
+                        clock_id = candidate_clock_id
+                        item["matched_clock_id"] = candidate_clock_id
+                        break
+                except Exception as exc:
+                    if len(item["errors"]) < 10:
+                        item["errors"].append({
+                            "clock_id": candidate_clock_id,
+                            "error": f"{type(exc).__name__}: {str(exc)[:400]}",
+                        })
+        except Exception as exc:
+            item["error"] = f"{type(exc).__name__}: {str(exc)[:500]}"
+
+    if clock_id:
+        item = result["clock_retrieve"]
+        item["attempted"] = True
+        try:
+            clock = stripe.test_helpers.TestClock.retrieve(clock_id)
+            frozen = getattr(clock, "frozen_time", None)
+            if frozen is None and isinstance(clock, dict):
+                frozen = clock.get("frozen_time")
+            item["frozen_time"] = frozen
+            if frozen:
+                item["effective_now"] = datetime.fromtimestamp(
+                    int(frozen), tz=timezone.utc
+                ).isoformat()
+        except Exception as exc:
+            item["error"] = f"{type(exc).__name__}: {str(exc)[:500]}"
+    return result
+
+
 def _stripe_test_clock_now_for_organisation(
     db: Session, organisation: Organisation
 ) -> datetime | None:
@@ -622,6 +748,9 @@ def retention_diagnostics(db: Session) -> list[dict]:
             "stripe_test_clock_id": test_clock_id or None,
             "stripe_customer_id": (subscription.external_customer_id if subscription else None),
             "is_due": bool(scheduled_at and scheduled_at <= effective_now),
+            "stripe_test_clock_resolution": _stripe_test_clock_resolution_diagnostics(
+                db, organisation
+            ),
         })
     return rows
 
