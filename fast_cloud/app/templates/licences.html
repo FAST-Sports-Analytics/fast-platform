@@ -28,7 +28,7 @@
     <td>{% if item.owner_type == 'club' %}{{ item.club.name if item.club else 'Unassigned club' }}{% else %}{{ item.user.email if item.user else 'Unassigned user' }}{% endif %}</td>
     <td>{{ item.devices|selectattr('active')|list|length }}/{{ item.max_devices }} devices{% if item.owner_type == 'club' %}<br><span class="muted">{{ item.max_users }} users</span>{% endif %}</td>
     <td>{{ item.expires_at.strftime('%d.%m.%Y') if item.expires_at else 'Never' }}</td>
-    <td><div class="licence-actions"><a class="button primary" href="/admin/licences/{{ item.id }}/edit">Edit</a>{% if item.renewable %}<form method="post" action="/admin/licences/{{ item.id }}/renew">{{ csrf_token(request) and '<input type="hidden" name="csrf_token" value="' ~ csrf_token(request) ~ '">' | safe or "" }}<input type="hidden" name="days" value="365"><button>+ 1 year</button></form>{% endif %}</div></td>
+    <td><div class="licence-actions"><a class="button primary" href="/admin/licences/{{ item.id }}/edit">Edit</a>{% if item.renewable %}<form method="post" action="/admin/licences/{{ item.id }}/renew">{% set _csrf = csrf_token(request) %}{% if _csrf %}<input type="hidden" name="csrf_token" value="{{ _csrf }}">{% endif %}<input type="hidden" name="days" value="365"><button>+ 1 year</button></form>{% endif %}</div></td>
   </tr>{% else %}<tr><td colspan="11">No licences match this view.</td></tr>{% endfor %}
   </tbody></table></div>
 </section>
@@ -38,12 +38,12 @@
   {% for item in licence_templates %}<article class="template-card {% if not item.active %}disabled-card{% endif %}">
     <div><span class="badge">{{ item.owner_type|title }}</span><h3>{{ item.name }}</h3><p>{{ item.tier }}</p></div>
     <dl><div><dt>Products</dt><dd>{{ json.loads(item.products_json)|join(', ') }}</dd></div><div><dt>Sports</dt><dd>{{ json.loads(item.sports_json)|join(', ') or 'All sports' }}</dd></div><div><dt>Limits</dt><dd>{{ item.default_max_devices }} devices{% if item.owner_type == 'club' %}, {{ item.default_max_users }} users{% endif %}</dd></div><div><dt>Expiry</dt><dd>{{ item.default_duration_days ~ ' days' if item.default_duration_days else 'Never' }}</dd></div></dl>
-    <div class="actions"><a class="button primary" href="/admin/licences/new?template_id={{ item.id }}">Use template</a><form method="post" action="/admin/licences/templates/{{ item.id }}/status">{{ csrf_token(request) and '<input type="hidden" name="csrf_token" value="' ~ csrf_token(request) ~ '">' | safe or "" }}<input type="hidden" name="active" value="{{ 'false' if item.active else 'true' }}"><button>{{ 'Disable' if item.active else 'Enable' }}</button></form></div>
+    <div class="actions"><a class="button primary" href="/admin/licences/new?template_id={{ item.id }}">Use template</a><form method="post" action="/admin/licences/templates/{{ item.id }}/status">{% set _csrf = csrf_token(request) %}{% if _csrf %}<input type="hidden" name="csrf_token" value="{{ _csrf }}">{% endif %}<input type="hidden" name="active" value="{{ 'false' if item.active else 'true' }}"><button>{{ 'Disable' if item.active else 'Enable' }}</button></form></div>
   </article>{% endfor %}
   </div>
 </section>
 <details class="panel"><summary><strong>Create licence template</strong></summary>
-<form class="form-grid template-form" method="post" action="/admin/licences/templates">{{ csrf_token(request) and '<input type="hidden" name="csrf_token" value="' ~ csrf_token(request) ~ '">' | safe or "" }}
+<form class="form-grid template-form" method="post" action="/admin/licences/templates">{% set _csrf = csrf_token(request) %}{% if _csrf %}<input type="hidden" name="csrf_token" value="{{ _csrf }}">{% endif %}
 <label>Template name<input name="name" required placeholder="FAST Professional Individual"></label><label>Owner type<select name="owner_type"><option value="individual">Individual</option><option value="club">Club</option></select></label><label>Tier<input name="tier" required value="FAST Professional"></label>
 <label>Maximum devices<input type="number" name="default_max_devices" min="1" max="50" value="2"></label><label>Maximum users<input type="number" name="default_max_users" min="1" max="500" value="1"></label><label>Duration days<input type="number" name="default_duration_days" min="1" max="3650" value="365"></label>
 <fieldset><legend>Products</legend><label class="check"><input type="checkbox" name="products" value="analysis" checked> FAST Analysis</label><label class="check"><input type="checkbox" name="products" value="viewer" checked> FAST Viewer</label></fieldset>

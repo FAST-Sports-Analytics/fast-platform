@@ -20,7 +20,7 @@
       <td>{{ item.component|title }}</td><td>{{ item.version or '—' }}</td>
       <td><strong>{{ item.exception_type }}</strong><br><small>{{ item.message or 'No message' }}</small></td>
       <td>{{ item.occurrence_count }}</td><td>{{ item.device_id or 'Unknown' }}</td><td>{{ item.last_seen_at }}</td>
-      <td><form method="post" action="/admin/diagnostics/{{ item.id }}/status">{{ csrf_token(request) and '<input type="hidden" name="csrf_token" value="' ~ csrf_token(request) ~ '">' | safe or "" }}<select name="status"><option value="open">Open</option><option value="investigating">Investigating</option><option value="resolved">Resolved</option><option value="ignored">Ignored</option></select><button type="submit">Save</button></form></td>
+      <td><form method="post" action="/admin/diagnostics/{{ item.id }}/status">{% set _csrf = csrf_token(request) %}{% if _csrf %}<input type="hidden" name="csrf_token" value="{{ _csrf }}">{% endif %}<select name="status"><option value="open">Open</option><option value="investigating">Investigating</option><option value="resolved">Resolved</option><option value="ignored">Ignored</option></select><button type="submit">Save</button></form></td>
     </tr><tr><td colspan="8"><details><summary>Traceback and context</summary><pre>{{ item.traceback or item.message }}</pre><small>Channel: {{ item.channel or '—' }} · Ring: {{ item.deployment_ring or '—' }} · First seen: {{ item.first_seen_at }}</small></details></td></tr>{% endfor %}</tbody>
   </table></div>
   {% else %}<div class="empty-state"><h3>No crashes reported</h3><p>Launcher exceptions will appear here automatically.</p></div>{% endif %}

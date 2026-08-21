@@ -89,7 +89,6 @@ async def _require_admin_csrf(request: Request) -> None:
 
 
 templates.env.globals["csrf_token"] = _admin_csrf_token
-router.dependencies.append(Depends(_require_admin_csrf))
 
 
 def _safe_release_filename(item: Release, original_name: str) -> str:
@@ -354,7 +353,7 @@ def login_submit(
     return response
 
 
-@router.post("/logout")
+@router.post("/logout", dependencies=[Depends(_require_admin_csrf)])
 def logout():
     response = RedirectResponse("/admin/login", status_code=303)
     response.delete_cookie(COOKIE_NAME)
@@ -404,7 +403,7 @@ def new_user_page(request: Request, db: Session = Depends(get_db)):
     )
 
 
-@router.post("/users/new", response_class=HTMLResponse)
+@router.post("/users/new", response_class=HTMLResponse, dependencies=[Depends(_require_admin_csrf)])
 def create_user(
     request: Request,
     full_name: str = Form(...),
@@ -518,7 +517,7 @@ def users_page(
     )
 
 
-@router.post("/users/{user_id}/status")
+@router.post("/users/{user_id}/status", dependencies=[Depends(_require_admin_csrf)])
 def update_user_status(
     user_id: int,
     request: Request,
@@ -543,7 +542,7 @@ def update_user_status(
     return RedirectResponse(f"{return_to}?message=User+status+updated.", status_code=303)
 
 
-@router.post("/users/{user_id}/verify")
+@router.post("/users/{user_id}/verify", dependencies=[Depends(_require_admin_csrf)])
 def verify_user_email(
     user_id: int,
     request: Request,
@@ -560,7 +559,7 @@ def verify_user_email(
     return RedirectResponse("/admin/users?message=Email+marked+as+verified.", status_code=303)
 
 
-@router.post("/users/{user_id}/role")
+@router.post("/users/{user_id}/role", dependencies=[Depends(_require_admin_csrf)])
 def update_user_role(
     user_id: int,
     request: Request,
@@ -682,7 +681,7 @@ def _hard_delete_customer_organisation(db: Session, organisation: Organisation) 
     db.delete(organisation)
 
 
-@router.post("/users/{user_id}/delete")
+@router.post("/users/{user_id}/delete", dependencies=[Depends(_require_admin_csrf)])
 def delete_user(
     user_id: int,
     request: Request,
@@ -803,7 +802,7 @@ def user_profile(user_id: int, request: Request, db: Session = Depends(get_db)):
     )
 
 
-@router.post("/users/{user_id}/edit")
+@router.post("/users/{user_id}/edit", dependencies=[Depends(_require_admin_csrf)])
 def edit_user(
     user_id: int, request: Request, full_name: str = Form(""), email: str = Form(...),
     club_id: str = Form(""), licence_id: str = Form(""), db: Session = Depends(get_db),
@@ -838,7 +837,7 @@ def edit_user(
     return RedirectResponse(f"/admin/users/{user_id}?message=User+details+updated.", status_code=303)
 
 
-@router.post("/users/{user_id}/password")
+@router.post("/users/{user_id}/password", dependencies=[Depends(_require_admin_csrf)])
 def reset_user_password(
     user_id: int, request: Request, password: str = Form(...), db: Session = Depends(get_db),
 ):
@@ -885,7 +884,7 @@ def organisations_page(
     })
 
 
-@router.post("/organisations")
+@router.post("/organisations", dependencies=[Depends(_require_admin_csrf)])
 def create_organisation(
     request: Request,
     name: str = Form(...),
@@ -997,7 +996,7 @@ def organisation_profile(
     })
 
 
-@router.post("/organisations/{organisation_id}/users")
+@router.post("/organisations/{organisation_id}/users", dependencies=[Depends(_require_admin_csrf)])
 def create_organisation_user(
     organisation_id: int, request: Request, full_name: str = Form(...), email: str = Form(...),
     password: str = Form(...), role: str = Form("analyst"), products: list[str] = Form([]), sports: list[str] = Form([]), db: Session = Depends(get_db),
@@ -1034,7 +1033,7 @@ def create_organisation_user(
     return RedirectResponse(f"/admin/organisations/{organisation_id}?message=User+created.", status_code=303)
 
 
-@router.post("/organisations/{organisation_id}/users/{user_id}")
+@router.post("/organisations/{organisation_id}/users/{user_id}", dependencies=[Depends(_require_admin_csrf)])
 def update_organisation_user(organisation_id: int, user_id: int, request: Request, full_name: str = Form(""),
                              role: str = Form("analyst"), status: str = Form("active"), products: list[str] = Form([]), sports: list[str] = Form([]), db: Session = Depends(get_db)):
     admin = require_portal_admin(request, db)
@@ -1097,7 +1096,7 @@ def update_organisation_user(organisation_id: int, user_id: int, request: Reques
 
 
 
-@router.post("/organisations/{organisation_id}/devices/{device_id}/deactivate")
+@router.post("/organisations/{organisation_id}/devices/{device_id}/deactivate", dependencies=[Depends(_require_admin_csrf)])
 def organisation_deactivate_device(organisation_id: int, device_id: int, request: Request, db: Session = Depends(get_db)):
     admin = require_portal_admin(request, db)
     _ensure_organisation_access(admin, organisation_id)
@@ -1110,7 +1109,7 @@ def organisation_deactivate_device(organisation_id: int, device_id: int, request
     db.commit()
     return RedirectResponse(f"/admin/organisations/{organisation_id}?message=Device+deactivated.", status_code=303)
 
-@router.post("/organisations/{organisation_id}/update")
+@router.post("/organisations/{organisation_id}/update", dependencies=[Depends(_require_admin_csrf)])
 def update_organisation(
     organisation_id: int,
     request: Request,
@@ -1153,7 +1152,7 @@ def update_organisation(
     return RedirectResponse(f"/admin/organisations/{item.id}?message=Organisation+updated.", status_code=303)
 
 
-@router.post("/organisations/{organisation_id}/delete")
+@router.post("/organisations/{organisation_id}/delete", dependencies=[Depends(_require_admin_csrf)])
 def delete_organisation(
     organisation_id: int,
     request: Request,
@@ -1215,7 +1214,7 @@ def delete_organisation(
     )
 
 
-@router.post("/organisations/{organisation_id}/restore")
+@router.post("/organisations/{organisation_id}/restore", dependencies=[Depends(_require_admin_csrf)])
 def restore_organisation(
     organisation_id: int,
     request: Request,
@@ -1260,7 +1259,7 @@ def restore_organisation(
 
 
 
-@router.post("/organisations/{organisation_id}/clubs")
+@router.post("/organisations/{organisation_id}/clubs", dependencies=[Depends(_require_admin_csrf)])
 def assign_club_to_organisation(
     organisation_id: int,
     request: Request,
@@ -1296,7 +1295,7 @@ def clubs_page(
     )
 
 
-@router.post("/clubs")
+@router.post("/clubs", dependencies=[Depends(_require_admin_csrf)])
 def create_club(
     request: Request,
     name: str = Form(...),
@@ -1344,7 +1343,7 @@ def club_profile(
     )
 
 
-@router.post("/clubs/{club_id}/update")
+@router.post("/clubs/{club_id}/update", dependencies=[Depends(_require_admin_csrf)])
 def update_club(
     club_id: int,
     request: Request,
@@ -1374,7 +1373,7 @@ def update_club(
     return RedirectResponse(f"/admin/clubs/{club.id}?message=Club+updated.", status_code=303)
 
 
-@router.post("/clubs/{club_id}/members")
+@router.post("/clubs/{club_id}/members", dependencies=[Depends(_require_admin_csrf)])
 def add_club_member(
     club_id: int,
     request: Request,
@@ -1395,7 +1394,7 @@ def add_club_member(
     return RedirectResponse(f"/admin/clubs/{club_id}?message=Member+added.", status_code=303)
 
 
-@router.post("/clubs/{club_id}/members/{member_id}/role")
+@router.post("/clubs/{club_id}/members/{member_id}/role", dependencies=[Depends(_require_admin_csrf)])
 def update_club_member_role(
     club_id: int,
     member_id: int,
@@ -1450,7 +1449,7 @@ def update_club_member_role(
     )
 
 
-@router.post("/clubs/{club_id}/members/{member_id}/remove")
+@router.post("/clubs/{club_id}/members/{member_id}/remove", dependencies=[Depends(_require_admin_csrf)])
 def remove_club_member(club_id: int, member_id: int, request: Request, db: Session = Depends(get_db)):
     admin = require_portal_admin(request, db)
     member = db.get(ClubMember, member_id)
@@ -1555,7 +1554,7 @@ def _licence_form_context(
     )
 
 
-@router.post("/licences/new", response_class=HTMLResponse)
+@router.post("/licences/new", response_class=HTMLResponse, dependencies=[Depends(_require_admin_csrf)])
 def new_licence_submit(
     request: Request,
     owner_type: str = Form("individual"),
@@ -1621,7 +1620,7 @@ def new_licence_submit(
     return _licence_form_context(request, admin, db, generated_code=code)
 
 
-@router.post("/licences/templates")
+@router.post("/licences/templates", dependencies=[Depends(_require_admin_csrf)])
 def create_licence_template(
     request: Request,
     name: str = Form(...),
@@ -1653,7 +1652,7 @@ def create_licence_template(
     return RedirectResponse("/admin/licences?message=Licence+template+created.", status_code=303)
 
 
-@router.post("/licences/templates/{template_id}/status")
+@router.post("/licences/templates/{template_id}/status", dependencies=[Depends(_require_admin_csrf)])
 def update_template_status(
     template_id: int, request: Request, active: str = Form(...), db: Session = Depends(get_db)
 ):
@@ -1691,7 +1690,7 @@ def edit_licence_page(
     })
 
 
-@router.post("/licences/{licence_id}/edit")
+@router.post("/licences/{licence_id}/edit", dependencies=[Depends(_require_admin_csrf)])
 def edit_licence_submit(
     licence_id: int,
     request: Request,
@@ -1767,7 +1766,7 @@ def edit_licence_submit(
     return RedirectResponse(f"/admin/licences/{licence_id}/edit?message=Licence+saved.", status_code=303)
 
 
-@router.post("/licences/{licence_id}/reset-devices")
+@router.post("/licences/{licence_id}/reset-devices", dependencies=[Depends(_require_admin_csrf)])
 def reset_licence_devices(
     licence_id: int,
     request: Request,
@@ -1784,7 +1783,7 @@ def reset_licence_devices(
     return RedirectResponse(f"/admin/licences/{licence_id}/edit?message=Device+activations+reset.", status_code=303)
 
 
-@router.post("/licences/{licence_id}/status")
+@router.post("/licences/{licence_id}/status", dependencies=[Depends(_require_admin_csrf)])
 def update_licence_status(
     licence_id: int,
     request: Request,
@@ -1806,7 +1805,7 @@ def update_licence_status(
     return RedirectResponse("/admin/licences?message=Licence+status+updated.", status_code=303)
 
 
-@router.post("/licences/{licence_id}/renew")
+@router.post("/licences/{licence_id}/renew", dependencies=[Depends(_require_admin_csrf)])
 def renew_licence(
     licence_id: int,
     request: Request,
@@ -1832,7 +1831,7 @@ def renew_licence(
     return RedirectResponse("/admin/licences?message=Licence+renewed.", status_code=303)
 
 
-@router.post("/licences/{licence_id}/assign")
+@router.post("/licences/{licence_id}/assign", dependencies=[Depends(_require_admin_csrf)])
 def assign_licence(
     licence_id: int,
     request: Request,
@@ -1967,7 +1966,7 @@ def releases_page(
     })
 
 
-@router.post("/releases")
+@router.post("/releases", dependencies=[Depends(_require_admin_csrf)])
 def create_release(
     request: Request, component: str = Form(...), version: str = Form(...),
     channel: str = Form("internal"), release_notes: str = Form(""),
@@ -2007,7 +2006,7 @@ def create_release(
     return RedirectResponse("/admin/releases?message=Draft+release+created.", status_code=303)
 
 
-@router.post("/releases/{release_id}/update")
+@router.post("/releases/{release_id}/update", dependencies=[Depends(_require_admin_csrf)])
 def update_release(
     release_id: int, request: Request, version: str = Form(...), channel: str = Form(...),
     release_notes: str = Form(""), product_target: str = Form("all"),
@@ -2044,7 +2043,7 @@ def update_release(
     return RedirectResponse("/admin/releases?message=Draft+release+updated.", status_code=303)
 
 
-@router.post("/releases/{release_id}/package")
+@router.post("/releases/{release_id}/package", dependencies=[Depends(_require_admin_csrf)])
 async def upload_release_package(
     release_id: int, request: Request, package: UploadFile = File(...),
     db: Session = Depends(get_db),
@@ -2097,7 +2096,7 @@ async def upload_release_package(
     return RedirectResponse("/admin/releases?message=Release+package+uploaded+and+verified.", status_code=303)
 
 
-@router.post("/releases/{release_id}/package/restore")
+@router.post("/releases/{release_id}/package/restore", dependencies=[Depends(_require_admin_csrf)])
 async def restore_release_package(
     release_id: int, request: Request, package: UploadFile = File(...),
     db: Session = Depends(get_db),
@@ -2167,7 +2166,7 @@ async def restore_release_package(
     return RedirectResponse(f"/admin/releases?message={message}", status_code=303)
 
 
-@router.post("/releases/{release_id}/package/delete")
+@router.post("/releases/{release_id}/package/delete", dependencies=[Depends(_require_admin_csrf)])
 def delete_release_package(release_id: int, request: Request, db: Session = Depends(get_db)):
     admin = require_portal_admin(request, db)
     item = db.get(Release, release_id)
@@ -2212,7 +2211,7 @@ def download_release_checksum(release_id: int, request: Request, db: Session = D
     )
 
 
-@router.post("/releases/{release_id}/publish")
+@router.post("/releases/{release_id}/publish", dependencies=[Depends(_require_admin_csrf)])
 def publish_release(release_id: int, request: Request, db: Session = Depends(get_db)):
     admin = require_portal_admin(request, db)
     item = db.get(Release, release_id)
@@ -2242,7 +2241,7 @@ def publish_release(release_id: int, request: Request, db: Session = Depends(get
     return RedirectResponse("/admin/releases?message=Release+published.", status_code=303)
 
 
-@router.post("/releases/{release_id}/unpublish")
+@router.post("/releases/{release_id}/unpublish", dependencies=[Depends(_require_admin_csrf)])
 def unpublish_release(release_id: int, request: Request, db: Session = Depends(get_db)):
     admin = require_portal_admin(request, db)
     item = db.get(Release, release_id)
@@ -2259,7 +2258,7 @@ def unpublish_release(release_id: int, request: Request, db: Session = Depends(g
     return RedirectResponse("/admin/releases?message=Release+returned+to+draft.", status_code=303)
 
 
-@router.post("/releases/{release_id}/promote")
+@router.post("/releases/{release_id}/promote", dependencies=[Depends(_require_admin_csrf)])
 def promote_release(
     release_id: int, request: Request, target_channel: str = Form(...),
     db: Session = Depends(get_db),
@@ -2303,7 +2302,7 @@ def promote_release(
     return RedirectResponse("/admin/releases?message=Release+promoted.", status_code=303)
 
 
-@router.post("/releases/{release_id}/withdraw")
+@router.post("/releases/{release_id}/withdraw", dependencies=[Depends(_require_admin_csrf)])
 def withdraw_release(release_id: int, request: Request, db: Session = Depends(get_db)):
     admin = require_portal_admin(request, db)
     item = db.get(Release, release_id)
@@ -2320,7 +2319,7 @@ def withdraw_release(release_id: int, request: Request, db: Session = Depends(ge
     return RedirectResponse("/admin/releases?message=Release+withdrawn.", status_code=303)
 
 
-@router.post("/releases/{release_id}/archive")
+@router.post("/releases/{release_id}/archive", dependencies=[Depends(_require_admin_csrf)])
 def archive_release(release_id: int, request: Request, db: Session = Depends(get_db)):
     admin = require_portal_admin(request, db)
     item = db.get(Release, release_id)
@@ -2337,7 +2336,7 @@ def archive_release(release_id: int, request: Request, db: Session = Depends(get
     return RedirectResponse("/admin/releases?message=Release+archived.", status_code=303)
 
 
-@router.post("/releases/{release_id}/restore")
+@router.post("/releases/{release_id}/restore", dependencies=[Depends(_require_admin_csrf)])
 def restore_release(release_id: int, request: Request, db: Session = Depends(get_db)):
     admin = require_portal_admin(request, db)
     item = db.get(Release, release_id)
@@ -2354,7 +2353,7 @@ def restore_release(release_id: int, request: Request, db: Session = Depends(get
     return RedirectResponse("/admin/releases?message=Release+restored+as+draft.", status_code=303)
 
 
-@router.post("/releases/{release_id}/delete")
+@router.post("/releases/{release_id}/delete", dependencies=[Depends(_require_admin_csrf)])
 def delete_release(release_id: int, request: Request, db: Session = Depends(get_db)):
     admin = require_portal_admin(request, db)
     item = db.get(Release, release_id)
@@ -2587,7 +2586,7 @@ def device_live_status(
     }
 
 
-@router.post("/devices/{device_id}/rename")
+@router.post("/devices/{device_id}/rename", dependencies=[Depends(_require_admin_csrf)])
 def rename_device(
     device_id: int,
     request: Request,
@@ -2608,7 +2607,7 @@ def rename_device(
     return RedirectResponse("/admin/devices?message=Device+renamed.", status_code=303)
 
 
-@router.post("/devices/{device_id}/status")
+@router.post("/devices/{device_id}/status", dependencies=[Depends(_require_admin_csrf)])
 def update_device_status(
     device_id: int,
     request: Request,
@@ -2636,7 +2635,7 @@ def update_device_status(
 
 
 
-@router.post("/devices/{device_id}/commands")
+@router.post("/devices/{device_id}/commands", dependencies=[Depends(_require_admin_csrf)])
 def queue_remote_device_command(
     device_id: int,
     request: Request,
@@ -2671,7 +2670,7 @@ def queue_remote_device_command(
     db.commit()
     return RedirectResponse("/admin/devices?message=Remote+command+queued.", status_code=303)
 
-@router.post("/devices/{device_id}/force-signout")
+@router.post("/devices/{device_id}/force-signout", dependencies=[Depends(_require_admin_csrf)])
 def force_device_signout(
     device_id: int,
     request: Request,
@@ -2687,7 +2686,7 @@ def force_device_signout(
     return RedirectResponse("/admin/devices?message=Device+signed+out.", status_code=303)
 
 
-@router.post("/devices/licence/{licence_id}/reset")
+@router.post("/devices/licence/{licence_id}/reset", dependencies=[Depends(_require_admin_csrf)])
 def reset_devices_for_licence(
     licence_id: int,
     request: Request,
@@ -2707,7 +2706,7 @@ def reset_devices_for_licence(
     return RedirectResponse(f"/admin/devices?message={changed}+device+activation(s)+reset.", status_code=303)
 
 
-@router.post("/devices/{device_id}/deployment-ring")
+@router.post("/devices/{device_id}/deployment-ring", dependencies=[Depends(_require_admin_csrf)])
 def update_device_deployment_ring(
     device_id: int, request: Request, deployment_ring: str = Form(...), db: Session = Depends(get_db),
 ):
@@ -2724,7 +2723,7 @@ def update_device_deployment_ring(
     return RedirectResponse("/admin/devices?message=Deployment+ring+updated.", status_code=303)
 
 
-@router.post("/releases/{release_id}/deployment-ring")
+@router.post("/releases/{release_id}/deployment-ring", dependencies=[Depends(_require_admin_csrf)])
 def promote_release_deployment_ring(
     release_id: int, request: Request, deployment_ring: str = Form(...), db: Session = Depends(get_db),
 ):
@@ -2745,7 +2744,7 @@ def promote_release_deployment_ring(
     return RedirectResponse("/admin/releases?message=Deployment+ring+updated.", status_code=303)
 
 
-@router.post("/releases/{release_id}/mandatory")
+@router.post("/releases/{release_id}/mandatory", dependencies=[Depends(_require_admin_csrf)])
 def set_release_mandatory(
     request: Request, release_id: int, mandatory: str = Form("0"),
     mandatory_deadline: str = Form(""), db: Session = Depends(get_db),
@@ -2772,7 +2771,7 @@ def set_release_mandatory(
     return RedirectResponse("/admin/releases?message=Mandatory+update+settings+saved.", status_code=303)
 
 
-@router.post("/releases/{release_id}/rollout")
+@router.post("/releases/{release_id}/rollout", dependencies=[Depends(_require_admin_csrf)])
 def update_release_rollout(
     release_id: int, request: Request, rollout_percentage: int = Form(...),
     rollout_action: str = Form("active"), rollout_notes: str = Form(""), db: Session = Depends(get_db),
@@ -2810,7 +2809,7 @@ def diagnostics_page(request: Request, db: Session = Depends(get_db)):
     })
 
 
-@router.post("/diagnostics/{incident_id}/status")
+@router.post("/diagnostics/{incident_id}/status", dependencies=[Depends(_require_admin_csrf)])
 def diagnostics_status(incident_id: int, request: Request, status: str = Form(...), db: Session = Depends(get_db)):
     admin = current_admin(request, db)
     if not admin:
@@ -2923,7 +2922,7 @@ def subscriptions_page(request: Request, db: Session = Depends(get_db)):
     })
 
 
-@router.post("/subscriptions/plans")
+@router.post("/subscriptions/plans", dependencies=[Depends(_require_admin_csrf)])
 def create_subscription_plan(
     request: Request, name: str = Form(...), description: str = Form(""), monthly_price: float = Form(0),
     annual_price: float = Form(0), trial_days: int = Form(0), included_seats: int = Form(1),
@@ -2951,7 +2950,7 @@ def create_subscription_plan(
     return RedirectResponse("/admin/subscriptions?message=Plan+created.", status_code=303)
 
 
-@router.post("/subscriptions/assign")
+@router.post("/subscriptions/assign", dependencies=[Depends(_require_admin_csrf)])
 def assign_subscription_plan(
     request: Request,
     organisation_id: int = Form(...),

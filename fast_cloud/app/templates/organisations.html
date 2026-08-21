@@ -3,7 +3,7 @@
 {% block content %}
 <div class="page-heading"><div><h1>Organisations</h1><p>Create and manage customer organisations, subscriptions, sports and seats.</p></div></div>
 {% if message %}<div class="alert success">{{ message }}</div>{% endif %}{% if error %}<div class="alert error">{{ error }}</div>{% endif %}
-<section class="panel"><h2>New organisation</h2><form class="form-grid" method="post" action="/admin/organisations">{{ csrf_token(request) and '<input type="hidden" name="csrf_token" value="' ~ csrf_token(request) ~ '">' | safe or "" }}
+<section class="panel"><h2>New organisation</h2><form class="form-grid" method="post" action="/admin/organisations">{% set _csrf = csrf_token(request) %}{% if _csrf %}<input type="hidden" name="csrf_token" value="{{ _csrf }}">{% endif %}
 <label>Organisation name<input name="name" required placeholder="e.g. Hemel Hempstead Town FC"></label>
 <label>Subscription tier<input name="subscription_tier" value="FAST Professional" required></label>
 <label>Primary contact<input name="contact_name" placeholder="Contact name"></label>

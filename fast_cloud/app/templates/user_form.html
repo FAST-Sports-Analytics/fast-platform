@@ -3,7 +3,7 @@
 {% block content %}
 <div class="page-heading"><div><a class="back-link" href="/admin/users">← Users</a><h1>Create customer user</h1><p>Create a customer account and optionally assign a club and individual licence.</p></div></div>
 {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
-<form class="panel account-form" method="post" action="/admin/users/new">{{ csrf_token(request) and '<input type="hidden" name="csrf_token" value="' ~ csrf_token(request) ~ '">' | safe or "" }}
+<form class="panel account-form" method="post" action="/admin/users/new">{% set _csrf = csrf_token(request) %}{% if _csrf %}<input type="hidden" name="csrf_token" value="{{ _csrf }}">{% endif %}
   <div class="form-grid">
     <label><span>Full name</span><input name="full_name" value="{{ values.full_name or '' }}" autocomplete="name"></label>
     <label><span>Email address</span><input type="email" name="email" value="{{ values.email or '' }}" required autocomplete="email"></label>

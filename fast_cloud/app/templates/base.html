@@ -30,7 +30,7 @@
     <span class="nav-disabled">Settings <small>Coming later</small></span>
     {% endif %}
   </nav>
-  <form class="sidebar-footer" action="/admin/logout" method="post">{{ csrf_token(request) and '<input type="hidden" name="csrf_token" value="' ~ csrf_token(request) ~ '">' | safe or "" }}<button class="link-button">Sign out</button></form>
+  <form class="sidebar-footer" action="/admin/logout" method="post">{% set _csrf = csrf_token(request) %}{% if _csrf %}<input type="hidden" name="csrf_token" value="{{ _csrf }}">{% endif %}<button class="link-button">Sign out</button></form>
 </aside>
 {% else %}
 <header><div class="brand"><strong>FAST</strong><span>Cloud Admin</span></div></header>
