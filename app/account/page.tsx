@@ -586,8 +586,12 @@ export default function AccountPage() {
       </div>}
 
       {!user.organisation_admin ? <section className="account-panel">
-        <h2>Organisation billing</h2>
-        <p>Only your organisation administrator can change the FAST subscription or billing details.</p>
+        <div className="account-panel-heading"><div><p className="eyebrow">Your FAST access</p><h2>Downloads</h2></div></div>
+        <p>Install FAST Launcher on this device. Launcher will sign you in and install only the FAST products your organisation has assigned to your account.</p>
+        <div className="account-actions">
+          <Link className="button button-primary" href="/downloads">Downloads</Link>
+        </div>
+        <p>Subscription, billing and organisation management are available only to your organisation administrator.</p>
       </section> : <>
         <section className="account-panel">
           <div className="account-panel-heading"><div><p className="eyebrow">{subscription?.plan ? "Current subscription" : "Subscription"}</p><h2>{subscription?.plan ? `FAST ${subscription.plan.name}` : "No active FAST subscription"}</h2></div>{subscription?.plan && <strong className="account-price">{currentPrice}</strong>}</div>
