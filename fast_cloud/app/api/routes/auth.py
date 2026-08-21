@@ -16,16 +16,17 @@ from app.core.subscription_access import organisation_subscription_access
 from app.core.security import (
     create_access_token,
     create_refresh_token,
-    decode_token,
+    decode_token_claims,
     hash_password,
     verify_password,
 )
 from app.api.deps import get_authenticated_user, get_current_user
 from app.api.routes.subscriptions import subscription_payload
 from app.db.session import get_db
-from app.models import AuditLog, Club, ClubMember, DeviceActivation, DeviceAuditLog, Licence, Organisation, User
+from app.models import AuditLog, Club, ClubMember, DeviceActivation, DeviceAuditLog, Licence, Organisation, RefreshSession, User
 from app.schemas.auth import (
     LoginRequest,
+    LogoutRequest,
     RefreshRequest,
     RegisterRequest,
     SessionStatusRequest,
@@ -51,6 +52,33 @@ def _is_expired(value: datetime | None) -> bool:
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
     return value < datetime.now(timezone.utc)
+
+
+def _jti_hash(jti: str) -> str:
+    return hashlib.sha256(jti.encode("utf-8")).hexdigest()
+
+
+def _issue_refresh_session(db: Session, user: User) -> str:
+    token = create_refresh_token(user.id, user.auth_version)
+    claims = decode_token_claims(token, expected_type="refresh")
+    expires_at = datetime.fromtimestamp(int(claims["exp"]), tz=timezone.utc)
+    db.add(RefreshSession(
+        user_id=user.id,
+        jti_hash=_jti_hash(str(claims["jti"])),
+        expires_at=expires_at,
+    ))
+    return token
+
+
+def _revoke_all_refresh_sessions(db: Session, user: User) -> None:
+    now = datetime.now(timezone.utc)
+    sessions = db.scalars(select(RefreshSession).where(
+        RefreshSession.user_id == user.id,
+        RefreshSession.revoked_at.is_(None),
+    )).all()
+    for session in sessions:
+        session.revoked_at = now
+    user.auth_version = int(user.auth_version or 1) + 1
 
 
 
@@ -356,10 +384,11 @@ def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)
 
     user.last_login_at = datetime.now(timezone.utc)
     db.add(AuditLog(admin_user_id=user.id, action="login", category="user_activity", target_type="user", target_id=user.id, target_label=user.email, details=f"Launcher login as {('platform administrator' if (user.is_admin and user.organisation_id is None) else user.role or 'analyst')}"))
+    refresh_token = _issue_refresh_session(db, user)
     db.commit()
     return TokenResponse(
-        access_token=create_access_token(user.id),
-        refresh_token=create_refresh_token(user.id),
+        access_token=create_access_token(user.id, user.auth_version),
+        refresh_token=refresh_token,
         user=user_payload(user),
         licence=licence_payload(db, user),
     )
@@ -378,6 +407,7 @@ def change_password(payload: ChangePasswordRequest, user: User = Depends(get_cur
     if verify_password(payload.new_password, user.password_hash):
         raise HTTPException(status_code=400, detail="Your new password must be different from your current password")
     user.password_hash = hash_password(payload.new_password)
+    _revoke_all_refresh_sessions(db, user)
     user.must_change_password = False
     db.add(AuditLog(admin_user_id=user.id, action="password_changed", category="user_activity", target_type="user", target_id=user.id, target_label=user.email, details="User changed their password."))
     db.commit()
@@ -463,6 +493,7 @@ def reset_password(payload: PasswordResetConfirmRequest, request: Request, db: S
     if user.status == "suspended":
         raise HTTPException(status_code=403, detail="This account is suspended")
     user.password_hash = hash_password(payload.new_password)
+    _revoke_all_refresh_sessions(db, user)
     user.password_reset_token_hash = None
     user.password_reset_expires_at = None
     user.must_change_password = False
@@ -494,6 +525,7 @@ def accept_invitation(payload: AcceptInvitationRequest, request: Request, db: Se
     if user.status == "suspended":
         raise HTTPException(status_code=403, detail="This invitation is no longer available")
     user.password_hash = hash_password(payload.new_password)
+    _revoke_all_refresh_sessions(db, user)
     user.status = "active"
     user.email_verified = True
     user.must_change_password = False
@@ -515,18 +547,59 @@ def accept_invitation(payload: AcceptInvitationRequest, request: Request, db: Se
 @router.post("/refresh", response_model=TokenResponse)
 def refresh(payload: RefreshRequest, db: Session = Depends(get_db)) -> TokenResponse:
     try:
-        user_id = decode_token(payload.refresh_token, expected_type="refresh")
+        claims = decode_token_claims(payload.refresh_token, expected_type="refresh")
+        user_id = int(claims["sub"])
+        jti_hash = _jti_hash(str(claims["jti"]))
     except (InvalidTokenError, ValueError, KeyError) as exc:
         raise HTTPException(status_code=401, detail="Invalid or expired refresh token") from exc
+
     user = db.get(User, user_id)
     if not user or user.status != "active":
         raise HTTPException(status_code=401, detail="Account unavailable")
+    if int(claims.get("ver", 1)) != int(user.auth_version or 1):
+        raise HTTPException(status_code=401, detail="Session has expired. Please sign in again.")
+
+    session = db.scalar(select(RefreshSession).where(
+        RefreshSession.user_id == user.id,
+        RefreshSession.jti_hash == jti_hash,
+    ))
+    now = datetime.now(timezone.utc)
+    if not session or session.revoked_at is not None or _is_expired(session.expires_at):
+        raise HTTPException(status_code=401, detail="Refresh session is no longer valid")
+
+    # Rotate on every refresh. The presented token becomes unusable immediately.
+    session.revoked_at = now
+    new_refresh_token = _issue_refresh_session(db, user)
+    new_claims = decode_token_claims(new_refresh_token, expected_type="refresh")
+    session.replaced_by_jti_hash = _jti_hash(str(new_claims["jti"]))
+    db.commit()
+
     return TokenResponse(
-        access_token=create_access_token(user.id),
-        refresh_token=create_refresh_token(user.id),
+        access_token=create_access_token(user.id, user.auth_version),
+        refresh_token=new_refresh_token,
         user=user_payload(user),
         licence=licence_payload(db, user),
     )
+
+
+@router.post("/logout")
+def logout(payload: LogoutRequest, db: Session = Depends(get_db)) -> dict:
+    """Revoke the supplied refresh session. Safe to call repeatedly."""
+    try:
+        claims = decode_token_claims(payload.refresh_token, expected_type="refresh")
+        jti_hash = _jti_hash(str(claims["jti"]))
+        user_id = int(claims["sub"])
+    except (InvalidTokenError, ValueError, KeyError):
+        return {"message": "Signed out"}
+
+    session = db.scalar(select(RefreshSession).where(
+        RefreshSession.user_id == user_id,
+        RefreshSession.jti_hash == jti_hash,
+    ))
+    if session and session.revoked_at is None:
+        session.revoked_at = datetime.now(timezone.utc)
+        db.commit()
+    return {"message": "Signed out"}
 
 
 @router.post("/session")

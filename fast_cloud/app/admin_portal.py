@@ -176,10 +176,13 @@ def current_admin(request: Request, db: Session) -> User | None:
     if not token:
         return None
     try:
-        user_id = decode_token(token, expected_type="admin_portal")
+        claims = decode_token_claims(token, expected_type="admin_portal")
+        user_id = int(claims["sub"])
     except (InvalidTokenError, ValueError, KeyError):
         return None
     user = db.get(User, user_id)
+    if user and int(claims.get("ver", 1)) != int(user.auth_version or 1):
+        return None
     if not user or user.status != "active":
         return None
     if not (user.is_admin or (user.organisation_id is not None and (user.role or "").lower() == "administrator")):
@@ -299,7 +302,7 @@ def login_submit(
     session_seconds = max(1, settings.admin_portal_session_days) * 24 * 60 * 60
     response.set_cookie(
         COOKIE_NAME,
-        create_admin_portal_token(user.id),
+        create_admin_portal_token(user.id, user.auth_version),
         httponly=True,
         samesite="lax",
         secure=settings.environment.lower() == "production",
@@ -803,6 +806,7 @@ def reset_user_password(
     if len(password) < 10:
         return RedirectResponse(f"/admin/users/{user_id}?error=Password+must+be+at+least+10+characters.", status_code=303)
     user.password_hash = hash_password(password)
+    user.auth_version = int(user.auth_version or 1) + 1
     _record_audit(db, require_portal_admin(request, db), "password_reset", "user", target_type="user", target_id=user.id, target_label=user.email, details="Temporary password updated by FAST Administrator.")
     db.commit()
     return RedirectResponse(f"/admin/users/{user_id}?message=Temporary+password+updated.", status_code=303)

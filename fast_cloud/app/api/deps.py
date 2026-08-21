@@ -3,7 +3,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jwt import InvalidTokenError
 from sqlalchemy.orm import Session
 
-from app.core.security import decode_token
+from app.core.security import decode_token_claims
 from app.db.session import get_db
 from app.models import User
 
@@ -22,7 +22,8 @@ def get_authenticated_user(
     continue to use get_current_user and therefore still reject suspended users.
     """
     try:
-        user_id = decode_token(credentials.credentials)
+        claims = decode_token_claims(credentials.credentials)
+        user_id = int(claims["sub"])
     except (InvalidTokenError, ValueError, KeyError) as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -34,6 +35,8 @@ def get_authenticated_user(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Account unavailable",
         )
+    if int(claims.get("ver", 1)) != int(user.auth_version or 1):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session has expired. Please sign in again.")
     return user
 
 
@@ -42,12 +45,15 @@ def get_current_user(
     db: Session = Depends(get_db),
 ) -> User:
     try:
-        user_id = decode_token(credentials.credentials)
+        claims = decode_token_claims(credentials.credentials)
+        user_id = int(claims["sub"])
     except (InvalidTokenError, ValueError, KeyError) as exc:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token") from exc
     user = db.get(User, user_id)
     if not user or user.status != "active":
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Account unavailable")
+    if int(claims.get("ver", 1)) != int(user.auth_version or 1):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session has expired. Please sign in again.")
     return user
 
 

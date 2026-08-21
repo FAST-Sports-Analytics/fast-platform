@@ -19,7 +19,7 @@ def verify_password(password: str, encoded: str) -> bool:
     return password_hash.verify(password, encoded)
 
 
-def create_token(subject: str, token_type: str, lifetime: timedelta) -> str:
+def create_token(subject: str, token_type: str, lifetime: timedelta, auth_version: int = 1) -> str:
     now = datetime.now(timezone.utc)
     payload = {
         "sub": subject,
@@ -27,31 +27,40 @@ def create_token(subject: str, token_type: str, lifetime: timedelta) -> str:
         "iat": now,
         "exp": now + lifetime,
         "jti": secrets.token_hex(16),
+        "ver": int(auth_version),
     }
     return jwt.encode(payload, settings.jwt_secret, algorithm="HS256")
 
 
-def create_access_token(user_id: int) -> str:
-    return create_token(str(user_id), "access", timedelta(minutes=settings.access_token_minutes))
+def create_access_token(user_id: int, auth_version: int = 1) -> str:
+    return create_token(str(user_id), "access", timedelta(minutes=settings.access_token_minutes), auth_version)
 
 
-def create_refresh_token(user_id: int) -> str:
-    return create_token(str(user_id), "refresh", timedelta(days=settings.refresh_token_days))
+def create_refresh_token(user_id: int, auth_version: int = 1) -> str:
+    return create_token(str(user_id), "refresh", timedelta(days=settings.refresh_token_days), auth_version)
 
 
-def create_admin_portal_token(user_id: int) -> str:
+def create_admin_portal_token(user_id: int, auth_version: int = 1) -> str:
     """Create a persistent browser-session token for the FAST Cloud admin portal."""
     return create_token(
         str(user_id),
         "admin_portal",
         timedelta(days=max(1, settings.admin_portal_session_days)),
+        auth_version,
     )
 
 
-def decode_token(token: str, expected_type: str = "access") -> int:
+def decode_token_claims(token: str, expected_type: str = "access") -> dict:
     payload = jwt.decode(token, settings.jwt_secret, algorithms=["HS256"])
     if payload.get("type") != expected_type:
         raise jwt.InvalidTokenError("Unexpected token type")
+    if "sub" not in payload or "jti" not in payload:
+        raise jwt.InvalidTokenError("Incomplete token")
+    return payload
+
+
+def decode_token(token: str, expected_type: str = "access") -> int:
+    payload = decode_token_claims(token, expected_type)
     return int(payload["sub"])
 
 

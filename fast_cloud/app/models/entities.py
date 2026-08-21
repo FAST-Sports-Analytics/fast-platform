@@ -50,11 +50,25 @@ class User(Base):
     password_reset_token_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     password_reset_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     retention_email: Mapped[str | None] = mapped_column(String(320), nullable=True, index=True)
+    auth_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
 
     licences: Mapped[list[Licence]] = relationship(back_populates="user", foreign_keys="Licence.user_id")
     club_memberships: Mapped[list[ClubMember]] = relationship(back_populates="user", cascade="all, delete-orphan")
     owned_clubs: Mapped[list[Club]] = relationship(back_populates="owner", foreign_keys="Club.owner_user_id")
     organisation: Mapped[Organisation | None] = relationship(foreign_keys=[organisation_id])
+
+
+class RefreshSession(Base):
+    __tablename__ = "refresh_sessions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
+    jti_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    replaced_by_jti_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
 
 
 class Organisation(Base):

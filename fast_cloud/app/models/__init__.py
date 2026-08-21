@@ -11,6 +11,7 @@ from app.models.entities import (
     Organisation,
     Product,
     Release,
+    RefreshSession,
     RemoteCommand,
     Sport,
     SubscriptionPlan,
@@ -20,5 +21,5 @@ from app.models.entities import (
 
 __all__ = [
     "AuditLog", "BillingWebhookEvent", "CrashReport", "User", "Club", "ClubMember", "Licence", "DeviceActivation", "DeviceAuditLog",
-    "LicenceTemplate", "Product", "Sport", "SubscriptionPlan", "OrganisationSubscription", "Organisation", "Release", "RemoteCommand",
+    "LicenceTemplate", "RefreshSession", "Product", "Sport", "SubscriptionPlan", "OrganisationSubscription", "Organisation", "Release", "RemoteCommand",
 ]

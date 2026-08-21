@@ -40,6 +40,8 @@ def migrate_schema(engine: Engine) -> None:
                 connection.execute(text("ALTER TABLE users ADD COLUMN password_reset_expires_at DATETIME"))
             if "retention_email" not in user_columns:
                 connection.execute(text("ALTER TABLE users ADD COLUMN retention_email VARCHAR(320)"))
+            if "auth_version" not in user_columns:
+                connection.execute(text("ALTER TABLE users ADD COLUMN auth_version INTEGER NOT NULL DEFAULT 1"))
             connection.execute(text(
                 "CREATE INDEX IF NOT EXISTS ix_users_retention_email ON users (retention_email)"
             ))
