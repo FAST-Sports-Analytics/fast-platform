@@ -5,8 +5,8 @@ import Link from "next/link";
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 
-type OrgUser = { id:number; full_name:string; email:string; role:string; status:string; products:string[]; eligible_products:string[]; sports:string[]; invitation_status?:string; last_login_at?:string|null };
-type Device = { id:number; device_id:string; device_name:string; active:boolean; version?:string; last_seen_at?:string|null; deployment_ring?:string };
+type OrgUser = { id:number; full_name:string; email:string; role:string; status:string; products:string[]; eligible_products:string[]; sports:string[]; invitation_status?:string; last_login_at?:string|null; scheduled_access_release?:boolean; scheduled_access_release_at?:string|null };
+type Device = { id:number; device_id:string; device_name:string; active:boolean; version?:string; last_seen_at?:string|null; deployment_ring?:string; scheduled_deactivation?:boolean; scheduled_deactivation_at?:string|null };
 type Audit = { id:number; created_at:string; action:string; target:string; details:string };
 type Branding = { short_name:string; logo_url:string; primary_colour:string; secondary_colour:string; accent_colour:string };
 type Organisation = { id:number; name:string; tier?:string; status:string; max_seats?:number; seats_used:number; active_users:number; active_devices:number; max_devices?:number|null; products:string[]; sports:string[]; branding:Branding; health_checks?:{key:string;ok:boolean;label:string;detail:string}[]; subscription?:{display_status?:string;status?:string;plan?:{name?:string}|null} };
