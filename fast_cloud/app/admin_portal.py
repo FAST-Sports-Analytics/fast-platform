@@ -278,7 +278,7 @@ def login_submit(
         return templates.TemplateResponse(
             request,
             "login.html",
-            {"error": "Too many administrator sign-in attempts. Please wait before trying again."},
+            {"error": "Too many administrator login attempts. Please try again in 15 minutes."},
             status_code=429,
             headers=exc.headers,
         )

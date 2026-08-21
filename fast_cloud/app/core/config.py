@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     login_rate_attempts: int = 8
     login_rate_window_seconds: int = 900
     login_client_rate_attempts: int = 5
-    login_client_rate_window_seconds: int = 300
+    login_client_rate_window_seconds: int = 900
     admin_login_rate_attempts: int = 5
     admin_login_rate_window_seconds: int = 900
     token_submit_rate_attempts: int = 10

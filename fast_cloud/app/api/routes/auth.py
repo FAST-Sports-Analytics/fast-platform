@@ -325,14 +325,21 @@ def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)
     # - account-wide throttling slows distributed password guessing;
     # - client/account throttling stops rapid retries from one source without
     #   placing unrelated users behind the same proxy into one shared bucket.
-    limiter.enforce(
-        account_key,
-        RateLimit(settings.login_rate_attempts, settings.login_rate_window_seconds),
-    )
-    limiter.enforce(
-        client_account_key,
-        RateLimit(settings.login_client_rate_attempts, settings.login_client_rate_window_seconds),
-    )
+    try:
+        limiter.enforce(
+            account_key,
+            RateLimit(settings.login_rate_attempts, settings.login_rate_window_seconds),
+        )
+        limiter.enforce(
+            client_account_key,
+            RateLimit(settings.login_client_rate_attempts, settings.login_client_rate_window_seconds),
+        )
+    except HTTPException as exc:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many login attempts. Please try again in 15 minutes.",
+            headers=exc.headers,
+        ) from exc
 
     user = db.scalar(select(User).where(User.email == email))
     if not user or not verify_password(payload.password, user.password_hash):
