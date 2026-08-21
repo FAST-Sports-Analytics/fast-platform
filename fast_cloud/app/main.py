@@ -38,6 +38,34 @@ async def lifespan(_: FastAPI):
         if not real_email_ready:
             raise RuntimeError("FAST Cloud production requires a configured transactional email provider.")
 
+        expected_stripe_mode = str(settings.stripe_expected_mode or "test").strip().lower()
+        if expected_stripe_mode not in {"test", "live"}:
+            raise RuntimeError("FAST_CLOUD_STRIPE_EXPECTED_MODE must be either 'test' or 'live'.")
+
+        stripe_key = str(settings.stripe_secret_key or "").strip()
+        if stripe_key:
+            actual_stripe_mode = (
+                "live" if stripe_key.startswith("sk_live_")
+                else "test" if stripe_key.startswith("sk_test_")
+                else "unknown"
+            )
+            if actual_stripe_mode != expected_stripe_mode:
+                raise RuntimeError(
+                    "Stripe mode mismatch: FAST_CLOUD_STRIPE_EXPECTED_MODE="
+                    f"{expected_stripe_mode!r} but the configured Stripe secret key is "
+                    f"{actual_stripe_mode!r}."
+                )
+
+        if expected_stripe_mode == "live":
+            if not stripe_key.startswith("sk_live_"):
+                raise RuntimeError("FAST live billing requires a Stripe sk_live_ secret key.")
+            if not str(settings.stripe_webhook_secret or "").strip():
+                raise RuntimeError("FAST live billing requires FAST_CLOUD_STRIPE_WEBHOOK_SECRET.")
+            if bool(settings.api_docs_enabled):
+                raise RuntimeError(
+                    "FAST live production requires FAST_CLOUD_API_DOCS_ENABLED=false."
+                )
+
     Base.metadata.create_all(bind=engine)
     migrate_schema(engine)
     with SessionLocal() as db:
@@ -71,6 +99,9 @@ app = FastAPI(
     version="0.21.0a",
     description="Authentication, licensing and administration for FAST Sports Analytics.",
     lifespan=lifespan,
+    docs_url="/docs" if settings.api_docs_enabled else None,
+    redoc_url="/redoc" if settings.api_docs_enabled else None,
+    openapi_url="/openapi.json" if settings.api_docs_enabled else None,
 )
 
 # Browser-based account recovery on fastsportsanalytics.com needs to call

@@ -327,6 +327,15 @@ def _stripe_webhook_secret() -> str:
     return str(settings.stripe_webhook_secret or os.getenv("STRIPE_WEBHOOK_SECRET", "")).strip()
 
 
+def _stripe_mode() -> str:
+    key = _stripe_secret_key()
+    if key.startswith("sk_live_"):
+        return "live"
+    if key.startswith("sk_test_"):
+        return "test"
+    return "unconfigured"
+
+
 def _stripe_ready(*, webhook: bool = False) -> bool:
     if stripe is None or not _stripe_secret_key():
         return False
@@ -457,11 +466,13 @@ def _stripe_price_for_plan(plan: SubscriptionPlan, interval: str):
             # key. Fall back to FAST's known catalogue IDs so public checkout is
             # still usable, while retaining the validation below as the safety
             # boundary. Live catalogue prices should continue to use lookup keys.
-            known_price_id = next((
-                price_id
-                for price_id, mapped in _STRIPE_PRICE_PLAN_KEYS.items()
-                if mapped == (plan_key, interval)
-            ), None)
+            known_price_id = None
+            if _stripe_mode() == "test":
+                known_price_id = next((
+                    price_id
+                    for price_id, mapped in _STRIPE_PRICE_PLAN_KEYS.items()
+                    if mapped == (plan_key, interval)
+                ), None)
             if known_price_id:
                 candidate = stripe.Price.retrieve(known_price_id)
                 if bool(_obj_get(candidate, "active", True)):
@@ -934,7 +945,7 @@ def public_plans(db: Session = Depends(get_db)) -> dict:
     plans = db.scalars(select(SubscriptionPlan).where(SubscriptionPlan.active.is_(True)).order_by(SubscriptionPlan.id)).all()
     return {
         "billing_available": _stripe_ready(),
-        "billing_mode": "test" if _stripe_secret_key().startswith("sk_test_") else ("live" if _stripe_ready() else "unconfigured"),
+        "billing_mode": _stripe_mode(),
         "currency": settings.billing_currency.lower(),
         "supported_sports": [{"key": key, "name": name} for key, name in SUPPORTED_SPORTS],
         "plans": [plan_payload(item) for item in plans],

@@ -475,7 +475,9 @@ def _stripe_test_clock_details_for_organisation(
     return no clock and FAST falls back to real UTC time.
     """
     stripe_secret_key = _retention_stripe_secret_key()
-    if not stripe_secret_key:
+    # Stripe Test Clocks are strictly sandbox tooling. Never execute any
+    # Test Clock API path with a live secret key, regardless of stored IDs.
+    if not stripe_secret_key or not stripe_secret_key.startswith("sk_test_"):
         return None, ""
 
     subscription = db.scalar(
@@ -607,8 +609,12 @@ def _stripe_test_clock_resolution_diagnostics(
         "clock_enumeration": {"attempted": False, "clock_count": 0, "matched_clock_id": None, "errors": []},
         "clock_retrieve": {"attempted": False, "frozen_time": None, "effective_now": None, "error": None},
     }
-    if not settings.stripe_secret_key:
+    stripe_secret_key = _retention_stripe_secret_key()
+    if not stripe_secret_key or not stripe_secret_key.startswith("sk_test_"):
+        result["stripe_configured"] = bool(stripe_secret_key)
+        result["test_clock_available"] = False
         return result
+    result["test_clock_available"] = True
 
     subscription = db.scalar(
         select(OrganisationSubscription).where(

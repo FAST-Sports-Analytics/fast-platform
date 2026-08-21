@@ -13,8 +13,10 @@ from app.api.deps import get_current_user, require_admin
 from app.db.session import get_db
 from app.models import CrashReport, DeviceActivation, User
 from app.core.data_retention import purge_due_organisations, retention_diagnostics
+from app.core.config import get_settings
 
 router = APIRouter(prefix="/diagnostics", tags=["Diagnostics"])
+settings = get_settings()
 
 
 def _text(value: Any, limit: int) -> str:
@@ -101,7 +103,18 @@ def run_retention_pass(
     _: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    """Run one retention purge pass immediately using normal FAST time rules."""
+    """Run one retention purge pass immediately using normal FAST time rules.
+
+    This manual/destructive diagnostic exists for sandbox time-simulation tests
+    only. Live Stripe production relies on the normal hourly retention worker.
+    """
+    stripe_key = str(settings.stripe_secret_key or "").strip()
+    expected_mode = str(settings.stripe_expected_mode or "test").strip().lower()
+    if expected_mode == "live" or stripe_key.startswith("sk_live_"):
+        raise HTTPException(
+            status_code=404,
+            detail="Manual retention execution is not available in FAST live billing mode.",
+        )
     before = retention_diagnostics(db)
     purged = purge_due_organisations(db)
     after = retention_diagnostics(db)

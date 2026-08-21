@@ -56,6 +56,12 @@ class Settings(BaseSettings):
     # Stripe Billing (optional until commercial launch)
     stripe_secret_key: str = ""
     stripe_webhook_secret: str = ""
+    # Explicit deployment intent. Keep "test" while FAST is in Stripe Sandbox;
+    # change to "live" at commercial launch. Startup validates the key matches.
+    stripe_expected_mode: str = "test"
+    # Swagger/OpenAPI remains useful during launch testing. Set false for the
+    # public live deployment; live-mode production preflight requires it off.
+    api_docs_enabled: bool = True
     billing_currency: str = "gbp"
     billing_grace_days: int = 7
 
