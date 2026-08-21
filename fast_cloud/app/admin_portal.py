@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -47,6 +48,48 @@ settings = get_settings()
 SERVER_STARTED_AT = datetime.now(timezone.utc)
 
 RELEASES_ROOT = Path(__file__).resolve().parents[1] / "releases"
+
+
+def _admin_csrf_token(request: Request) -> str:
+    """Derive a CSRF token from the authenticated HttpOnly admin session.
+
+    The raw session cookie is never exposed to page JavaScript. Only this
+    one-way HMAC value is rendered into POST forms.
+    """
+    session_token = request.cookies.get(COOKIE_NAME, "")
+    if not session_token:
+        return ""
+    return hmac.new(
+        settings.jwt_secret.encode("utf-8"),
+        f"fast-admin-csrf:{session_token}".encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+async def _require_admin_csrf(request: Request) -> None:
+    """Protect state-changing FAST Cloud Admin requests from cross-site posts."""
+    if request.method.upper() not in {"POST", "PUT", "PATCH", "DELETE"}:
+        return
+    if request.url.path.rstrip("/") == "/admin/login":
+        # Login CSRF is not security-sensitive here because authentication
+        # creates a new admin session rather than mutating an existing one.
+        return
+
+    expected = _admin_csrf_token(request)
+    if not expected:
+        raise HTTPException(status_code=403, detail="Invalid or missing CSRF token")
+
+    supplied = request.headers.get("X-CSRF-Token", "")
+    if not supplied:
+        form = await request.form()
+        supplied = str(form.get("csrf_token") or "")
+
+    if not supplied or not hmac.compare_digest(supplied, expected):
+        raise HTTPException(status_code=403, detail="Invalid or missing CSRF token")
+
+
+templates.env.globals["csrf_token"] = _admin_csrf_token
+router.dependencies.append(Depends(_require_admin_csrf))
 
 
 def _safe_release_filename(item: Release, original_name: str) -> str:
