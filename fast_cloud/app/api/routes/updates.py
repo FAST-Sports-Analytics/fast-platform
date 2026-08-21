@@ -30,6 +30,41 @@ def _normalise_product(value: str) -> str:
     return normalise_product(value)
 
 
+def _current_update_licence(db: Session, user: User, device: DeviceActivation | None) -> Licence | None:
+    """Resolve the licence used for update entitlements.
+
+    A device activation can remain linked to an older licence row after a
+    subscription/licence replacement. Authentication already resolves the
+    newest active licence available to the signed-in user/organisation, so the
+    update manifest must do the same or it can incorrectly return Launcher only
+    while the Launcher UI correctly shows paid product access.
+    """
+    member_club_ids = select(ClubMember.club_id).where(ClubMember.user_id == user.id)
+    club_access = Licence.club_id.in_(member_club_ids)
+
+    if user.organisation_id is not None:
+        organisation_club_ids = select(Club.id).where(
+            Club.organisation_id == user.organisation_id
+        )
+        club_access = club_access | Licence.club_id.in_(organisation_club_ids)
+
+    licence = db.scalar(
+        select(Licence)
+        .where(
+            Licence.status == "active",
+            ((Licence.owner_type == "individual") & (Licence.user_id == user.id))
+            | ((Licence.owner_type == "club") & club_access),
+        )
+        .order_by(Licence.id.desc())
+    )
+    if licence is not None:
+        return licence
+
+    # Compatibility fallback for legacy device-only activations that do not yet
+    # resolve through the current user/club ownership model.
+    return device.licence if device is not None else None
+
+
 def _licensed_components(db: Session, user: User, device: DeviceActivation | None) -> set[str]:
     # Update/release APIs are part of the Launcher entitlement surface.  Never
     # expose paid components when the organisation subscription is blocked, even
@@ -38,10 +73,7 @@ def _licensed_components(db: Session, user: User, device: DeviceActivation | Non
     if not subscription_access.allowed:
         return {"launcher"}
 
-    licence = device.licence if device is not None else None
-    if licence is None:
-        active = [item for item in user.licences if item.status == "active"]
-        licence = active[0] if active else None
+    licence = _current_update_licence(db, user, device)
     if licence is None or not licence_is_current(licence.status, licence.expires_at):
         return {"launcher"}
     platform_admin = bool(user.is_admin and user.organisation_id is None)
