@@ -7,7 +7,7 @@
   <div class="form-grid">
     <label><span>Full name</span><input name="full_name" value="{{ values.full_name or '' }}" autocomplete="name"></label>
     <label><span>Email address</span><input type="email" name="email" value="{{ values.email or '' }}" required autocomplete="email"></label>
-    <label><span>Temporary password</span><input type="password" name="password" minlength="8" required autocomplete="new-password"><small>Minimum 8 characters. Send this to the customer securely.</small></label>
+    <label><span>Temporary password</span><input type="password" name="password" minlength="10" required autocomplete="new-password"><small>Minimum 10 characters. Send this to the customer securely.</small></label>
     <label><span>Email status</span><select name="email_verified"><option value="false">Unverified</option><option value="true">Verified</option></select></label>
     <label><span>Club</span><select name="club_id"><option value="">No club</option>{% for club in clubs %}<option value="{{ club.id }}" {% if values.club_id|string == club.id|string %}selected{% endif %}>{{ club.name }}</option>{% endfor %}</select></label>
     <label><span>Individual licence</span><select name="licence_id"><option value="">No licence</option>{% for licence in licences %}<option value="{{ licence.id }}" {% if values.licence_id|string == licence.id|string %}selected{% endif %}>{{ licence.tier }} · •••• {{ licence.code_last_four }}</option>{% endfor %}</select></label>

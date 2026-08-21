@@ -27,6 +27,12 @@ class Settings(BaseSettings):
     password_reset_expiry_minutes: int = 60
     password_reset_rate_attempts: int = 5
     password_reset_rate_window_seconds: int = 900
+    login_rate_attempts: int = 8
+    login_rate_window_seconds: int = 900
+    login_client_rate_attempts: int = 5
+    login_client_rate_window_seconds: int = 300
+    admin_login_rate_attempts: int = 5
+    admin_login_rate_window_seconds: int = 900
     token_submit_rate_attempts: int = 10
     token_submit_rate_window_seconds: int = 900
     invitation_resend_rate_attempts: int = 5

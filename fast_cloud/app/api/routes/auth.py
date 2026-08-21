@@ -315,14 +315,38 @@ def verify_email(payload: VerifyEmailRequest, db: Session = Depends(get_db)) -> 
 
 
 @router.post("/login", response_model=TokenResponse)
-def login(payload: LoginRequest, db: Session = Depends(get_db)) -> TokenResponse:
-    user = db.scalar(select(User).where(User.email == payload.email.lower().strip()))
+def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)) -> TokenResponse:
+    email = payload.email.lower().strip()
+    client = client_address(request)
+    account_key = f"login:account:{email}"
+    client_account_key = f"login:client-account:{client}:{email}"
+
+    # Two complementary limits:
+    # - account-wide throttling slows distributed password guessing;
+    # - client/account throttling stops rapid retries from one source without
+    #   placing unrelated users behind the same proxy into one shared bucket.
+    limiter.enforce(
+        account_key,
+        RateLimit(settings.login_rate_attempts, settings.login_rate_window_seconds),
+    )
+    limiter.enforce(
+        client_account_key,
+        RateLimit(settings.login_client_rate_attempts, settings.login_client_rate_window_seconds),
+    )
+
+    user = db.scalar(select(User).where(User.email == email))
     if not user or not verify_password(payload.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Incorrect email or password")
     if user.status != "active":
         raise HTTPException(status_code=403, detail="Account is suspended")
     if not user.email_verified:
         raise HTTPException(status_code=403, detail="Verify your email address before signing in")
+
+    # A legitimate successful login clears the failed-attempt history for this
+    # account/source rather than penalising the user for old mistakes.
+    limiter.clear(account_key)
+    limiter.clear(client_account_key)
+
     user.last_login_at = datetime.now(timezone.utc)
     db.add(AuditLog(admin_user_id=user.id, action="login", category="user_activity", target_type="user", target_id=user.id, target_label=user.email, details=f"Launcher login as {('platform administrator' if (user.is_admin and user.organisation_id is None) else user.role or 'analyst')}"))
     db.commit()

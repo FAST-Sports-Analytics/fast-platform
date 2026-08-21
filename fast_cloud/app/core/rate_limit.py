@@ -43,6 +43,11 @@ class InMemoryRateLimiter:
                 )
             bucket.append(now)
 
+    def clear(self, key: str) -> None:
+        """Clear one limiter bucket after a successful sensitive operation."""
+        with self._lock:
+            self._events.pop(key, None)
+
 
 limiter = InMemoryRateLimiter()
 

@@ -20,6 +20,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.core.seats import ALLOCATED_USER_STATUSES, allocated_user_count, effective_user_seat_limit, organisation_device_capacity
+from app.core.rate_limit import RateLimit, client_address, limiter
 from app.core.data_retention import clear_organisation_deletion, schedule_organisation_deletion
 from app.core.subscription_access import evaluate_subscription
 from app.core.entitlements import ROLE_PRODUCTS, normalise_product
@@ -259,7 +260,30 @@ def login_submit(
     password: str = Form(...),
     db: Session = Depends(get_db),
 ):
-    user = db.scalar(select(User).where(User.email == email.lower().strip()))
+    clean_email = email.lower().strip()
+    client = client_address(request)
+    account_key = f"admin-login:account:{clean_email}"
+    client_account_key = f"admin-login:client-account:{client}:{clean_email}"
+
+    try:
+        limiter.enforce(
+            account_key,
+            RateLimit(settings.admin_login_rate_attempts, settings.admin_login_rate_window_seconds),
+        )
+        limiter.enforce(
+            client_account_key,
+            RateLimit(settings.admin_login_rate_attempts, settings.admin_login_rate_window_seconds),
+        )
+    except HTTPException as exc:
+        return templates.TemplateResponse(
+            request,
+            "login.html",
+            {"error": "Too many administrator sign-in attempts. Please wait before trying again."},
+            status_code=429,
+            headers=exc.headers,
+        )
+
+    user = db.scalar(select(User).where(User.email == clean_email))
     if not user or not verify_password(password, user.password_hash) or not user.is_admin:
         return templates.TemplateResponse(
             request,
@@ -267,6 +291,10 @@ def login_submit(
             {"error": "Incorrect administrator email or password."},
             status_code=401,
         )
+
+    limiter.clear(account_key)
+    limiter.clear(client_account_key)
+
     response = RedirectResponse("/admin/dashboard", status_code=303)
     session_seconds = max(1, settings.admin_portal_session_days) * 24 * 60 * 60
     response.set_cookie(
@@ -352,8 +380,8 @@ def create_user(
     error = ""
     if not clean_email or "@" not in clean_email:
         error = "Enter a valid email address."
-    elif len(password) < 8:
-        error = "The temporary password must be at least 8 characters."
+    elif len(password) < 10:
+        error = "The temporary password must be at least 10 characters."
     elif db.scalar(select(User).where(func.lower(User.email) == clean_email)):
         error = "An account already exists for that email address."
     if error:
@@ -772,8 +800,8 @@ def reset_user_password(
     user = db.get(User, user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    if len(password) < 8:
-        return RedirectResponse(f"/admin/users/{user_id}?error=Password+must+be+at+least+8+characters.", status_code=303)
+    if len(password) < 10:
+        return RedirectResponse(f"/admin/users/{user_id}?error=Password+must+be+at+least+10+characters.", status_code=303)
     user.password_hash = hash_password(password)
     _record_audit(db, require_portal_admin(request, db), "password_reset", "user", target_type="user", target_id=user.id, target_label=user.email, details="Temporary password updated by FAST Administrator.")
     db.commit()
@@ -934,8 +962,8 @@ def create_organisation_user(
         raise HTTPException(status_code=404, detail="Organisation not found")
     clean_email = email.lower().strip()
     valid_roles = {"administrator", "analyst", "coach", "scout"}
-    if role not in valid_roles or "@" not in clean_email or len(password) < 8:
-        return RedirectResponse(f"/admin/organisations/{organisation_id}?error=Enter+valid+user+details+and+an+8-character+password.", status_code=303)
+    if role not in valid_roles or "@" not in clean_email or len(password) < 10:
+        return RedirectResponse(f"/admin/organisations/{organisation_id}?error=Enter+valid+user+details+and+a+10-character+password.", status_code=303)
     if db.scalar(select(User).where(func.lower(User.email) == clean_email)):
         return RedirectResponse(f"/admin/organisations/{organisation_id}?error=That+email+already+has+an+account.", status_code=303)
     seats = db.scalar(select(func.count(User.id)).where(User.organisation_id == organisation.id, User.status == "active")) or 0
