@@ -120,7 +120,7 @@ const FALLBACK_SPORTS: SportOption[] = [
   { key: "baseball", name: "Baseball" },
 ];
 
-type PendingCheckout = { plan: Plan; interval: "monthly" | "annual" } | null;
+type PendingCheckout = { plan: Plan; interval: "monthly" | "annual"; kind: "checkout" | "change" } | null;
 
 function apiBase() {
   return (process.env.NEXT_PUBLIC_FAST_CLOUD_URL || "http://127.0.0.1:8766").replace(/\/+$/, "");
@@ -269,12 +269,19 @@ export default function AccountPage() {
       setSelectedSports([]);
       setMessage("");
       setError("");
-      setPendingCheckout({ plan, interval });
+      setPendingCheckout({ plan, interval, kind: "checkout" });
       return;
     }
     const samePlan = currentPlanId === plan.id;
     const sameInterval = subscription.billing_interval === interval;
     if (samePlan && sameInterval) return;
+    if (!samePlan) {
+      setSelectedSports([]);
+      setMessage("");
+      setError("");
+      setPendingCheckout({ plan, interval, kind: "change" });
+      return;
+    }
 
     setWorking(true);
     setMessage("");
@@ -319,19 +326,8 @@ export default function AccountPage() {
     setMessage("");
     setError("");
     try {
-      const preview = await api("/api/v1/subscriptions/checkout/preview", {
-        method: "POST",
-        body: JSON.stringify({
-          plan_id: pendingCheckout.plan.id,
-          billing_interval: pendingCheckout.interval,
-          sports: selectedSports,
-        }),
-      });
-      setPendingCheckout(null);
-      if (preview.downgrade_blocked) {
-        setPlanPreview(preview as PlanChangePreview);
-      } else {
-        const data = await api("/api/v1/subscriptions/checkout", {
+      if (pendingCheckout.kind === "change") {
+        const preview = await api("/api/v1/subscriptions/change-plan/preview", {
           method: "POST",
           body: JSON.stringify({
             plan_id: pendingCheckout.plan.id,
@@ -339,8 +335,32 @@ export default function AccountPage() {
             sports: selectedSports,
           }),
         });
-        if (!data.url) throw new Error("Stripe Checkout did not return a payment URL.");
-        window.location.assign(data.url);
+        setPendingCheckout(null);
+        setPlanPreview(preview as PlanChangePreview);
+      } else {
+        const preview = await api("/api/v1/subscriptions/checkout/preview", {
+          method: "POST",
+          body: JSON.stringify({
+            plan_id: pendingCheckout.plan.id,
+            billing_interval: pendingCheckout.interval,
+            sports: selectedSports,
+          }),
+        });
+        setPendingCheckout(null);
+        if (preview.downgrade_blocked) {
+          setPlanPreview(preview as PlanChangePreview);
+        } else {
+          const data = await api("/api/v1/subscriptions/checkout", {
+            method: "POST",
+            body: JSON.stringify({
+              plan_id: pendingCheckout.plan.id,
+              billing_interval: pendingCheckout.interval,
+              sports: selectedSports,
+            }),
+          });
+          if (!data.url) throw new Error("Stripe Checkout did not return a payment URL.");
+          window.location.assign(data.url);
+        }
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "FAST Cloud could not start checkout.");
@@ -383,7 +403,7 @@ export default function AccountPage() {
         : "/api/v1/subscriptions/change-plan/preview";
       const preview = await api(previewEndpoint, {
         method: "POST",
-        body: JSON.stringify({ plan_id: planPreview.target_plan.id, billing_interval: planPreview.target_billing_interval }),
+        body: JSON.stringify({ plan_id: planPreview.target_plan.id, billing_interval: planPreview.target_billing_interval, sports: selectedSports }),
       });
       setPlanPreview(preview as PlanChangePreview);
       setCapacityManagerOpen(false);
@@ -425,6 +445,7 @@ export default function AccountPage() {
           plan_id: planPreview.target_plan.id,
           billing_interval: planPreview.target_billing_interval,
           proration_date: planPreview.proration_date || undefined,
+          sports: selectedSports,
         }),
       });
       if (data.effective === "period_end") {
@@ -649,7 +670,7 @@ export default function AccountPage() {
             : (pendingCheckout.plan.name.toLowerCase() === "starter" ? "Sport selected. You can continue to secure checkout." : `You can select ${5 - selectedSports.length} more sport${5 - selectedSports.length === 1 ? "" : "s"}.`)}</p>
           <div className="account-modal-actions">
             <button className="button button-quiet" type="button" disabled={working} onClick={() => setPendingCheckout(null)}>Cancel</button>
-            <button className="button button-primary" type="button" disabled={working || selectedSports.length < 1} onClick={continueCheckoutWithSports}>{working ? "Processing…" : `Continue to Stripe · ${pendingCheckout.interval === "monthly" ? money(pendingCheckout.plan.monthly_price_pence) : money(pendingCheckout.plan.annual_price_pence)}`}</button>
+            <button className="button button-primary" type="button" disabled={working || selectedSports.length < 1} onClick={continueCheckoutWithSports}>{working ? "Processing…" : pendingCheckout.kind === "change" ? "Continue to review" : `Continue to Stripe · ${pendingCheckout.interval === "monthly" ? money(pendingCheckout.plan.monthly_price_pence) : money(pendingCheckout.plan.annual_price_pence)}`}</button>
           </div>
         </div>
       </section>

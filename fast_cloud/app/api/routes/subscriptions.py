@@ -1299,6 +1299,41 @@ class ChangePlanRequest(BaseModel):
     plan_id: int
     billing_interval: str = "monthly"
     proration_date: int | None = None
+    sports: list[str] = Field(default_factory=list, max_length=5)
+
+
+def _validated_plan_change_sports(
+    payload: ChangePlanRequest,
+    plan: SubscriptionPlan,
+    *,
+    require_selection: bool,
+) -> list[str]:
+    """Validate sport selection for an existing subscription plan change.
+
+    A plan switch must explicitly carry the customer's target sports so an old
+    Starter entitlement cannot silently survive a Professional upgrade. Billing
+    interval-only changes may omit sports and preserve the existing metadata.
+    """
+    plan_key = str(plan.name or "").strip().lower()
+    if plan_key not in {"starter", "professional"}:
+        raise HTTPException(status_code=409, detail="This plan requires a FAST sales-assisted agreement")
+    requested_sports = [
+        _normalise_sport(value)
+        for value in payload.sports
+        if _normalise_sport(value)
+    ]
+    requested_sports = list(dict.fromkeys(requested_sports))
+    if any(value not in SUPPORTED_SPORT_KEYS for value in requested_sports):
+        raise HTTPException(status_code=422, detail="Choose only supported FAST sports")
+    max_sports = 1 if plan_key == "starter" else 5
+    if require_selection and not requested_sports:
+        raise HTTPException(status_code=422, detail="Choose your licensed sport(s) before changing your FAST plan")
+    if len(requested_sports) > max_sports:
+        raise HTTPException(
+            status_code=422,
+            detail=f"FAST {plan.name} includes up to {max_sports} sport{'s' if max_sports != 1 else ''}",
+        )
+    return requested_sports
 
 
 def _invoice_line_is_proration(line) -> bool:
@@ -1373,6 +1408,8 @@ def preview_subscription_plan_change(payload: ChangePlanRequest, user: User = De
         subscription_item_id = str(_obj_get(first_item, "id", "") or "")
         current_plan = _plan_from_live_stripe_price(db, current_sub) or (db.get(SubscriptionPlan, item.plan_id) if item.plan_id else None)
         current_interval = _subscription_billing_interval(current_sub, item.billing_interval)
+        plan_is_changing = not current_plan or current_plan.id != target.id
+        requested_sports = _validated_plan_change_sports(payload, target, require_selection=plan_is_changing)
         if current_plan and current_plan.id == target.id and current_interval == interval:
             return {"change": "unchanged", "effective": "now", "target_plan": plan_payload(target)}
 
@@ -1605,14 +1642,21 @@ def change_subscription_plan(payload: ChangePlanRequest, user: User = Depends(ge
             raise HTTPException(status_code=409, detail="Stripe subscription has no billable item")
         subscription_item_id = str(_obj_get(sub_items[0], "id", "") or "")
         current_plan = _plan_from_live_stripe_price(db, current_sub) or (db.get(SubscriptionPlan, item.plan_id) if item.plan_id else None)
-        if current_plan and current_plan.id == target.id and _subscription_billing_interval(current_sub, item.billing_interval) == interval:
+        current_interval = _subscription_billing_interval(current_sub, item.billing_interval)
+        plan_is_changing = not current_plan or current_plan.id != target.id
+        requested_sports = _validated_plan_change_sports(payload, target, require_selection=plan_is_changing)
+        if current_plan and current_plan.id == target.id and current_interval == interval:
             return {"change": "unchanged", "effective": "now", "subscription": subscription_payload(db, organisation_id)}
 
-        current_interval = _subscription_billing_interval(current_sub, item.billing_interval)
         target_amount = target.monthly_price_pence if interval == "monthly" else target.annual_price_pence
         is_downgrade = _is_plan_downgrade(current_plan, target, current_interval, interval)
         metadata = dict(_obj_get(current_sub, "metadata", {}) or {})
         metadata.update({"fast_organisation_id": str(organisation_id), "fast_plan_id": str(target.id), "fast_billing_interval": interval})
+        if requested_sports:
+            metadata.update({
+                "fast_sport": requested_sports[0],
+                "fast_sports": ",".join(requested_sports),
+            })
 
         if is_downgrade:
             capacity = _downgrade_capacity_payload(db, organisation_id, target, item)
