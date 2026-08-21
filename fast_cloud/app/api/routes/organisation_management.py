@@ -16,7 +16,7 @@ from app.core.email import EmailDeliveryError, branded_action_email, send_email
 from app.core.config import get_settings
 from app.core.rate_limit import RateLimit, client_address, limiter
 from app.db.session import get_db
-from app.models import AuditLog, Club, DeviceActivation, DeviceAuditLog, Licence, Organisation, User
+from app.models import AuditLog, Club, DeviceActivation, DeviceAuditLog, Licence, Organisation, OrganisationSubscription, User
 from app.api.routes.subscriptions import subscription_payload
 from app.core.seats import allocated_user_count, effective_user_seat_limit, user_would_consume_new_seat
 
@@ -231,6 +231,33 @@ def _overview(db: Session, organisation_id: int) -> dict:
     allocated_users = allocated_user_count(db, organisation_id)
     active_devices = sum(1 for item in devices if item.active)
     subscription = subscription_payload(db, organisation_id, refresh_provider=True)
+
+    # Surface access releases/deactivations already staged for a future downgrade.
+    pending_user_ids: set[int] = set()
+    pending_device_ids: set[int] = set()
+    pending_access_effective_at = None
+    subscription_row = db.scalar(
+        select(OrganisationSubscription).where(
+            OrganisationSubscription.organisation_id == organisation_id
+        )
+    )
+    if subscription_row and subscription_row.pending_downgrade_plan_id:
+        try:
+            pending_user_ids = {
+                int(value)
+                for value in json.loads(subscription_row.pending_downgrade_user_ids_json or "[]")
+            }
+        except (TypeError, ValueError, json.JSONDecodeError):
+            pending_user_ids = set()
+        try:
+            pending_device_ids = {
+                int(value)
+                for value in json.loads(subscription_row.pending_downgrade_device_ids_json or "[]")
+            }
+        except (TypeError, ValueError, json.JSONDecodeError):
+            pending_device_ids = set()
+        pending_access_effective_at = subscription_row.pending_downgrade_effective_at
+
     plan = subscription.get("plan") or {}
     max_devices = int(subscription.get("device_limit") or plan.get("max_devices") or 0)
     seat_limit = int(subscription.get("seat_limit") or effective_user_seat_limit(db, organisation))
@@ -290,6 +317,12 @@ def _overview(db: Session, organisation_id: int) -> dict:
                 else "pending" if item.status == "invited"
                 else "not_applicable"
             ),
+            "scheduled_access_release": item.id in pending_user_ids,
+            "scheduled_access_release_at": (
+                pending_access_effective_at.isoformat()
+                if item.id in pending_user_ids and pending_access_effective_at
+                else None
+            ),
         } for item in users],
         "devices": [{
             "id": item.id,
@@ -299,6 +332,12 @@ def _overview(db: Session, organisation_id: int) -> dict:
             "version": item.installed_version,
             "last_seen_at": item.last_validated_at.isoformat() if item.last_validated_at else None,
             "deployment_ring": item.deployment_ring or organisation.deployment_ring,
+            "scheduled_deactivation": item.id in pending_device_ids,
+            "scheduled_deactivation_at": (
+                pending_access_effective_at.isoformat()
+                if item.id in pending_device_ids and pending_access_effective_at
+                else None
+            ),
         } for item in devices],
         "audit": [{
             "id": item.id,
