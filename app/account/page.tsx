@@ -57,6 +57,33 @@ type UserInfo = {
   organisation_admin?: boolean;
 };
 
+type EffectiveAccess = {
+  licensed?: boolean;
+  products?: string[];
+  sports?: string[];
+  licence?: {
+    tier?: string;
+    max_devices?: number;
+    max_users?: number;
+    expires_at?: string | null;
+    access_grant?: {
+      grant_type?: string;
+      tier?: string;
+      products?: string[];
+      sports?: string[];
+      max_devices?: number;
+      max_users?: number;
+      release_channel?: string;
+      expires_at?: string | null;
+    } | null;
+  } | null;
+  subscription_access?: {
+    status?: string;
+    message?: string;
+    access_ends_at?: string | null;
+  } | null;
+};
+
 type OrganisationManagementUser = {
   id: number;
   full_name?: string;
@@ -156,6 +183,10 @@ export default function AccountPage() {
   const [capacityOverview, setCapacityOverview] = useState<OrganisationManagementOverview | null>(null);
   const [selectedUserIds, setSelectedUserIds] = useState<number[]>([]);
   const [selectedDeviceIds, setSelectedDeviceIds] = useState<number[]>([]);
+  const [effectiveAccess, setEffectiveAccess] = useState<EffectiveAccess | null>(null);
+  const [betaCode, setBetaCode] = useState("");
+  const [betaTermsAccepted, setBetaTermsAccepted] = useState(false);
+  const [betaWorking, setBetaWorking] = useState(false);
 
   function token() {
     return typeof window === "undefined" ? "" : window.sessionStorage.getItem("fast_access_token") || "";
@@ -195,7 +226,7 @@ export default function AccountPage() {
     try {
       const stored = JSON.parse(window.sessionStorage.getItem("fast_user") || "{}");
       setUser(stored);
-      const [profile, current, catalogue] = await Promise.all([
+      const [profile, current, catalogue, access] = await Promise.all([
         api("/api/v1/auth/me"),
         api("/api/v1/subscriptions/current"),
         fetch(`${apiBase()}/api/v1/subscriptions/public-plans`, { headers: { Accept: "application/json" } }).then(async response => {
@@ -203,10 +234,12 @@ export default function AccountPage() {
           if (!response.ok) throw new Error(data.detail || "Subscription plans are unavailable.");
           return data;
         }),
+        api("/api/v1/licences/entitlements").catch(() => null),
       ]);
       setUser(profile || stored);
       window.sessionStorage.setItem("fast_user", JSON.stringify(profile || stored));
       setSubscription(current.subscription || null);
+      setEffectiveAccess(access);
       setPlans((catalogue.plans || []).filter((plan: Plan) => plan.self_service_upgrades !== false && ["starter", "professional"].includes(plan.name.toLowerCase())));
       setSupportedSports(Array.isArray(catalogue.supported_sports) && catalogue.supported_sports.length ? catalogue.supported_sports : FALLBACK_SPORTS);
       setBillingMode(catalogue.billing_mode || "");
@@ -529,12 +562,55 @@ export default function AccountPage() {
     }
   }
 
+  async function redeemBetaCode() {
+    const code = betaCode.trim();
+    if (!code) {
+      setError("Enter your FAST Beta invitation code.");
+      return;
+    }
+    if (!betaTermsAccepted) {
+      setError("Accept the current FAST Beta Terms before activating Beta access.");
+      return;
+    }
+
+    setBetaWorking(true);
+    setError("");
+    setMessage("");
+    try {
+      const data = await api("/api/v1/beta/redeem", {
+        method: "POST",
+        body: JSON.stringify({
+          code,
+          organisation_name: user.organisation?.name || undefined,
+          accept_beta_terms: true,
+          beta_terms_version: "2026-08-22",
+        }),
+      });
+      setBetaCode("");
+      setBetaTermsAccepted(false);
+      setMessage(`FAST Beta access activated${data?.grant?.expires_at ? ` until ${dateLabel(data.grant.expires_at)}` : ""}. No payment is required.`);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "FAST could not activate this Beta invitation.");
+    } finally {
+      setBetaWorking(false);
+    }
+  }
+
   function logout() {
     window.sessionStorage.removeItem("fast_access_token");
     window.sessionStorage.removeItem("fast_refresh_token");
     window.sessionStorage.removeItem("fast_user");
     router.replace("/login");
   }
+
+  const accessGrant = effectiveAccess?.licence?.access_grant || null;
+  const betaAccessActive = accessGrant?.grant_type === "beta";
+  const accessStatus = betaAccessActive
+    ? "Beta active"
+    : accessGrant?.grant_type === "override"
+      ? "Override active"
+      : subscription?.display_status || subscription?.status || "Unconfigured";
 
   if (loading) return <main className="account-page"><div className="account-shell"><p className="eyebrow">FAST Cloud</p><h1>Loading your account…</h1></div></main>;
 
@@ -547,7 +623,7 @@ export default function AccountPage() {
     <div className="account-shell">
       <div className="account-title-row">
         <div><p className="eyebrow">FAST Cloud</p><h1>{user.organisation?.name || "Your FAST account"}</h1><p>{user.full_name || user.email} · {user.role?.replaceAll("_", " ") || "User"}</p></div>
-        <span className="account-status">{subscription?.display_status || subscription?.status || "Unconfigured"}</span>
+        <span className="account-status">{accessStatus}</span>
       </div>
 
       {error && <div className="account-message error">{error}</div>}
@@ -585,6 +661,29 @@ export default function AccountPage() {
         <button className="button button-quiet button-small" type="button" disabled={working} onClick={() => setCancelScheduledChangeOpen(true)}>{scheduledBillingIntervalChange ? "Cancel scheduled billing change" : "Cancel scheduled downgrade"}</button>
       </div>}
 
+      {betaAccessActive ? <section className="account-panel account-beta-panel">
+        <div className="account-panel-heading">
+          <div><p className="eyebrow">FAST Beta</p><h2>Your Beta access is active</h2></div>
+          <strong className="account-price">{accessGrant?.release_channel?.toUpperCase() || "BETA"}</strong>
+        </div>
+        <p>You can use the FAST products and sports included in your Beta invitation without a paid subscription.</p>
+        <div className="account-metrics">
+          <article><small>Products</small><strong>{(effectiveAccess?.products || accessGrant?.products || []).map(value => value[0].toUpperCase() + value.slice(1)).join(" + ") || "—"}</strong></article>
+          <article><small>Sports</small><strong>{(effectiveAccess?.sports || accessGrant?.sports || []).map(value => value.replaceAll("_", " ")).join(", ") || "—"}</strong></article>
+          <article><small>Users</small><strong>Up to {accessGrant?.max_users ?? effectiveAccess?.licence?.max_users ?? "—"}</strong></article>
+          <article><small>Beta access until</small><strong>{dateLabel(accessGrant?.expires_at || effectiveAccess?.subscription_access?.access_ends_at)}</strong></article>
+        </div>
+        <div className="account-actions"><Link className="button button-primary" href="/downloads">Download FAST</Link><Link className="button button-quiet" href="/organisation">Organisation Management</Link></div>
+      </section> : (!subscription?.plan && !accessGrant) ? <section className="account-panel account-beta-panel">
+        <div className="account-panel-heading"><div><p className="eyebrow">Invitation access</p><h2>Have a FAST Beta invitation?</h2></div></div>
+        <p>Enter the invitation code supplied by FAST Sports Analytics. Valid Beta access does not require a Stripe payment.</p>
+        <div className="account-beta-form">
+          <label>Beta invitation code<input value={betaCode} onChange={event => setBetaCode(event.target.value.toUpperCase())} autoComplete="off" spellCheck={false} placeholder="FAST-BETA-XXXXXXXX" disabled={betaWorking}/></label>
+          <label className="auth-check"><input type="checkbox" checked={betaTermsAccepted} onChange={event => setBetaTermsAccepted(event.target.checked)} disabled={betaWorking}/><span>I accept the current <Link href="/beta-terms" target="_blank" rel="noreferrer">FAST Beta Terms</Link>.</span></label>
+          <div className="account-actions"><button className="button button-primary" type="button" disabled={betaWorking || !betaCode.trim() || !betaTermsAccepted} onClick={redeemBetaCode}>{betaWorking ? "Activating…" : "Activate Beta Access"}</button></div>
+        </div>
+      </section> : null}
+
       {!user.organisation_admin ? <section className="account-panel">
         <div className="account-panel-heading"><div><p className="eyebrow">Your FAST access</p><h2>Downloads</h2></div></div>
         <p>Install FAST Launcher on this device. Launcher will sign you in and install only the FAST products your organisation has assigned to your account.</p>
@@ -603,9 +702,11 @@ export default function AccountPage() {
               <article><small>Billing</small><strong>{subscription?.billing_interval ? subscription.billing_interval[0].toUpperCase() + subscription.billing_interval.slice(1) : "—"}</strong></article>
             </div>
             <div className="account-entitlements"><span>{subscription.plan.products.map(value => `FAST ${value[0].toUpperCase()}${value.slice(1)}`).join(" + ")}</span><span>{subscription.plan.cloud_storage_gb} GB cloud storage</span></div>
-          </> : <p>{subscription?.status === "unconfigured"
-            ? "Your FAST account is ready. Choose a plan below to activate your licensed applications and organisation entitlements."
-            : "Your paid FAST access has ended. Choose a plan below to restore licensed applications and organisation entitlements."}</p>}
+          </> : <p>{betaAccessActive
+            ? "Your organisation currently has FAST Beta access. You can still choose a paid plan below if you want to move onto a normal subscription."
+            : subscription?.status === "unconfigured"
+              ? "Your FAST account is ready. Choose a plan below to activate your licensed applications and organisation entitlements."
+              : "Your paid FAST access has ended. Choose a plan below to restore licensed applications and organisation entitlements."}</p>}
           <div className="account-actions">
             <Link className="button button-primary" href="/downloads">Downloads</Link>
             <Link className="button button-quiet" href="/organisation">Organisation Management</Link>
