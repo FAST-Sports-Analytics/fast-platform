@@ -100,6 +100,17 @@ class Organisation(Base):
     clubs: Mapped[list[Club]] = relationship(back_populates="organisation")
 
 
+class LiveDashboardSnapshot(Base):
+    __tablename__ = "live_dashboard_snapshots"
+    __table_args__ = (UniqueConstraint("organisation_id", "match_id", name="uq_live_dashboard_org_match"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    organisation_id: Mapped[int] = mapped_column(ForeignKey("organisations.id"), nullable=False, index=True)
+    match_id: Mapped[str] = mapped_column(String(160), nullable=False, index=True)
+    payload_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False, index=True)
+
+
 class SubscriptionPlan(Base):
     __tablename__ = "subscription_plans"
 

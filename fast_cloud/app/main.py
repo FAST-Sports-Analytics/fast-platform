@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 
-from app.api.routes import admin_releases, admin_summary, auth, customer_downloads, diagnostics, licences, organisation_management, subscriptions, updates, users
+from app.api.routes import admin_releases, admin_summary, auth, customer_downloads, diagnostics, licences, organisation_management, subscriptions, updates, users, live_dashboards
 from app.admin_portal import router as admin_portal_router
 from app.releases import router as releases_router
 from app.core.config import get_settings
@@ -145,6 +145,7 @@ async def security_headers_and_local_recovery(request: Request, call_next):
 
 app.include_router(auth.router, prefix="/api/v1")
 app.include_router(users.router, prefix="/api/v1")
+app.include_router(live_dashboards.router, prefix="/api/v1")
 app.include_router(licences.router, prefix="/api/v1")
 app.include_router(licences.admin_router, prefix="/api/v1")
 app.include_router(admin_summary.router, prefix="/api/v1")

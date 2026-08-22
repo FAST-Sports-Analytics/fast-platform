@@ -8,6 +8,7 @@ from app.models.entities import (
     DeviceAuditLog,
     Licence,
     LicenceTemplate,
+    LiveDashboardSnapshot,
     Organisation,
     Product,
     Release,
@@ -21,5 +22,5 @@ from app.models.entities import (
 
 __all__ = [
     "AuditLog", "BillingWebhookEvent", "CrashReport", "User", "Club", "ClubMember", "Licence", "DeviceActivation", "DeviceAuditLog",
-    "LicenceTemplate", "RefreshSession", "Product", "Sport", "SubscriptionPlan", "OrganisationSubscription", "Organisation", "Release", "RemoteCommand",
+    "LicenceTemplate", "LiveDashboardSnapshot", "RefreshSession", "Product", "Sport", "SubscriptionPlan", "OrganisationSubscription", "Organisation", "Release", "RemoteCommand",
 ]
