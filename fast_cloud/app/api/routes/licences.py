@@ -9,6 +9,7 @@ from app.api.deps import get_current_user, require_admin
 from app.core.security import generate_licence_code, hash_licence_code, normalise_licence_code
 from app.core.entitlements import filter_products, filter_sports, licence_is_current
 from app.core.subscription_access import organisation_subscription_access
+from app.core.access_grants import current_access_grant, grant_payload
 from app.db.session import get_db
 from app.models import Club, ClubMember, DeviceActivation, DeviceAuditLog, Licence, User
 from app.schemas.licence import (
@@ -133,17 +134,28 @@ def serialise_for_user(db: Session, user: User, licence: Licence, active_devices
     payload = serialise(licence, active_devices)
     platform_admin = bool(user.is_admin and user.organisation_id is None)
     access_role = access_role_for_licence(db, user, licence)
+    grant = current_access_grant(db, user.organisation_id)
+    effective_products = grant.products_json if grant is not None else licence.products_json
+    effective_sports = grant.sports_json if grant is not None else licence.sports_json
     payload["access_role"] = access_role
     payload["products"] = filter_products(
-        licence.products_json,
+        effective_products,
         role=access_role,
         is_platform_admin=platform_admin,
         assigned_products=user.products_json,
     )
     payload["sports"] = filter_sports(
-        licence.sports_json,
+        effective_sports,
         assigned_sports=None if access_role == "administrator" else user.sports_json,
     )
+    if grant is not None:
+        gp = grant_payload(grant)
+        payload["tier"] = grant.tier
+        payload["features"] = gp["features"]
+        payload["max_devices"] = grant.max_devices
+        payload["max_users"] = grant.max_users
+        payload["expires_at"] = grant.expires_at
+        payload["access_grant"] = gp
     return payload
 
 
@@ -217,7 +229,9 @@ def activate(
             status_code=409,
             detail="This device has been deactivated. Ask your administrator to reactivate it before using FAST applications.",
         )
-    if not existing and active_count >= licence.max_devices:
+    grant = current_access_grant(db, user.organisation_id)
+    effective_max_devices = grant.max_devices if grant is not None else licence.max_devices
+    if not existing and active_count >= effective_max_devices:
         raise HTTPException(status_code=409, detail="Device activation limit reached")
 
     if existing:

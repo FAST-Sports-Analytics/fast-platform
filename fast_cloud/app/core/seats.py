@@ -6,6 +6,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models import Club, ClubMember, Licence, Organisation, OrganisationSubscription, User
+from app.core.access_grants import current_access_grant
 
 ALLOCATED_USER_STATUSES = {"active", "invited"}
 USABLE_LICENCE_STATUSES = {"unused", "active"}
@@ -23,6 +24,9 @@ def _licence_current(licence: Licence) -> bool:
 
 
 def effective_user_seat_limit(db: Session, organisation: Organisation) -> int:
+    grant = current_access_grant(db, organisation.id)
+    if grant is not None:
+        return max(1, int(grant.max_users or 1))
     subscription = db.scalar(
         select(OrganisationSubscription).where(
             OrganisationSubscription.organisation_id == organisation.id

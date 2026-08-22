@@ -13,6 +13,7 @@ from app.core.config import get_settings
 from app.core.rate_limit import RateLimit, client_address, limiter
 from app.core.entitlements import filter_products, filter_sports, licence_is_current
 from app.core.subscription_access import organisation_subscription_access
+from app.core.access_grants import current_access_grant, grant_payload
 from app.core.security import (
     create_access_token,
     create_refresh_token,
@@ -204,29 +205,33 @@ def licence_payload(db: Session, user: User) -> dict | None:
         return None
     platform_admin = bool(user.is_admin and user.organisation_id is None)
     access_role = _access_role_for_licence(db, user, licence)
+    grant = current_access_grant(db, user.organisation_id)
+    effective_products = grant.products_json if grant is not None else licence.products_json
+    effective_sports = grant.sports_json if grant is not None else licence.sports_json
     products = filter_products(
-        licence.products_json,
+        effective_products,
         role=access_role,
         is_platform_admin=platform_admin,
         assigned_products=user.products_json,
     )
-    sports = filter_sports(licence.sports_json, assigned_sports=None if access_role == "administrator" else user.sports_json)
+    sports = filter_sports(effective_sports, assigned_sports=None if access_role == "administrator" else user.sports_json)
     return {
         "id": licence.id,
-        "tier": licence.tier,
+        "tier": grant.tier if grant is not None else licence.tier,
         "products": products,
         "sports": sports,
-        "features": json.loads(getattr(licence, "features_json", "[]") or "[]"),
-        "expires_at": licence.expires_at,
-        "max_devices": licence.max_devices,
+        "features": grant_payload(grant)["features"] if grant is not None else json.loads(getattr(licence, "features_json", "[]") or "[]"),
+        "expires_at": grant.expires_at if grant is not None else licence.expires_at,
+        "max_devices": grant.max_devices if grant is not None else licence.max_devices,
         "active_devices": active_devices,
         "status": licence.status,
         "code_last_four": licence.code_last_four,
         "owner_type": licence.owner_type,
         "owner_user_id": licence.user_id,
         "owner_club_id": licence.club_id,
-        "max_users": licence.max_users,
+        "max_users": grant.max_users if grant is not None else licence.max_users,
         "access_role": access_role,
+        "access_grant": grant_payload(grant),
         "organisation": organisation_payload(licence),
         "subscription": subscription_payload(db, user.organisation_id) if user.organisation_id else None,
         "subscription_access": subscription_access.payload(),

@@ -15,6 +15,7 @@ from app.api.deps import get_current_user
 from app.core.storage import release_packages_dir
 from app.core.entitlements import filter_products, normalise_product, licence_is_current
 from app.core.subscription_access import organisation_subscription_access
+from app.core.access_grants import current_access_grant
 from app.db.session import get_db
 from app.models import AuditLog, Club, ClubMember, DeviceActivation, DeviceAuditLog, Licence, Release, RemoteCommand, User
 
@@ -77,10 +78,12 @@ def _licensed_components(db: Session, user: User, device: DeviceActivation | Non
     if licence is None or not licence_is_current(licence.status, licence.expires_at):
         return {"launcher"}
     platform_admin = bool(user.is_admin and user.organisation_id is None)
+    grant = current_access_grant(db, user.organisation_id)
+    effective_products = grant.products_json if grant is not None else licence.products_json
     products = {
         _normalise_product(item)
         for item in filter_products(
-            licence.products_json,
+            effective_products,
             role=user.role,
             is_platform_admin=platform_admin,
             assigned_products=user.products_json,
@@ -172,6 +175,11 @@ def update_manifest(
     channel = "internal" if requested_channel == "alpha" else requested_channel
     if channel not in CHANNELS:
         raise HTTPException(status_code=400, detail="Unknown release channel.")
+    grant = current_access_grant(db, user.organisation_id)
+    allowed_channel = str(getattr(grant, "release_channel", "stable") or "stable").lower() if grant is not None else "stable"
+    channel_rank = {"stable": 0, "beta": 1, "internal": 2, "alpha": 2}
+    if channel_rank.get(channel, 99) > channel_rank.get(allowed_channel, 0) and not bool(user.is_admin and user.organisation_id is None):
+        raise HTTPException(status_code=403, detail=f"Your FAST access is not enabled for the {requested_channel} release channel.")
 
     device = None
     effective_ring = "production"

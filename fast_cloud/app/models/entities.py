@@ -111,6 +111,64 @@ class LiveDashboardSnapshot(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False, index=True)
 
 
+class OrganisationAccessGrant(Base):
+    __tablename__ = "organisation_access_grants"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    organisation_id: Mapped[int] = mapped_column(ForeignKey("organisations.id"), nullable=False, index=True)
+    grant_type: Mapped[str] = mapped_column(String(30), default="override", index=True)
+    tier: Mapped[str] = mapped_column(String(80))
+    products_json: Mapped[str] = mapped_column(Text, default="[]")
+    sports_json: Mapped[str] = mapped_column(Text, default="[]")
+    features_json: Mapped[str] = mapped_column(Text, default="{}")
+    max_devices: Mapped[int] = mapped_column(Integer, default=1)
+    max_users: Mapped[int] = mapped_column(Integer, default=1)
+    release_channel: Mapped[str] = mapped_column(String(20), default="stable", index=True)
+    starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    source_beta_code_id: Mapped[int | None] = mapped_column(ForeignKey("beta_access_codes.id"), nullable=True, index=True)
+    created_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class BetaAccessCode(Base):
+    __tablename__ = "beta_access_codes"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    code_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    code_last_four: Mapped[str] = mapped_column(String(4), nullable=False)
+    label: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    tier: Mapped[str] = mapped_column(String(80), default="FAST Beta")
+    products_json: Mapped[str] = mapped_column(Text, default="[]")
+    sports_json: Mapped[str] = mapped_column(Text, default="[]")
+    features_json: Mapped[str] = mapped_column(Text, default="{}")
+    max_devices: Mapped[int] = mapped_column(Integer, default=2)
+    max_users: Mapped[int] = mapped_column(Integer, default=2)
+    release_channel: Mapped[str] = mapped_column(String(20), default="beta", index=True)
+    duration_days: Mapped[int] = mapped_column(Integer, default=60)
+    max_redemptions: Mapped[int] = mapped_column(Integer, default=1)
+    redemption_count: Mapped[int] = mapped_column(Integer, default=0)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    created_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class BetaCodeRedemption(Base):
+    __tablename__ = "beta_code_redemptions"
+    __table_args__ = (UniqueConstraint("beta_code_id", "organisation_id", name="uq_beta_code_org_redemption"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    beta_code_id: Mapped[int] = mapped_column(ForeignKey("beta_access_codes.id"), nullable=False, index=True)
+    organisation_id: Mapped[int] = mapped_column(ForeignKey("organisations.id"), nullable=False, index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
+    grant_id: Mapped[int | None] = mapped_column(ForeignKey("organisation_access_grants.id"), nullable=True, index=True)
+    beta_terms_version: Mapped[str] = mapped_column(String(40), default="2026-08-22")
+    redeemed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class SubscriptionPlan(Base):
     __tablename__ = "subscription_plans"
 

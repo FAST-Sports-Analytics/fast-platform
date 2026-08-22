@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import OrganisationSubscription
+from app.core.access_grants import current_access_grant
 
 
 ALLOWING_STATUSES = {"active", "trial"}
@@ -98,6 +99,9 @@ def evaluate_subscription(item: OrganisationSubscription | None, *, now: datetim
 def organisation_subscription_access(db: Session, organisation_id: int | None) -> SubscriptionAccess:
     if organisation_id is None:
         return SubscriptionAccess("not_applicable", True, False, "not_applicable", "Subscription enforcement does not apply to this account.")
+    grant = current_access_grant(db, organisation_id)
+    if grant is not None:
+        return SubscriptionAccess(str(grant.grant_type or "override"), True, False, "access_grant", f"FAST {grant.grant_type} access is active.", _utc(grant.expires_at))
     item = db.scalar(select(OrganisationSubscription).where(OrganisationSubscription.organisation_id == organisation_id))
     access = evaluate_subscription(item)
 
