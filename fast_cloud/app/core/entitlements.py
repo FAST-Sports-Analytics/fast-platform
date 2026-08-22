@@ -60,8 +60,13 @@ def filter_products(
     # Empty assignment means "use the role defaults". This preserves the
     # existing organisation workflow where role selection alone grants its
     # standard products; a non-empty assignment narrows those defaults.
+    # Organisation/platform administrators inherit the complete effective
+    # licence/grant product set. Historical per-user product assignments must
+    # not narrow a newly applied organisation access override (for example a
+    # Starter-era ["analysis"] assignment hiding Viewer from a Professional
+    # override). Non-admin roles can still be narrowed explicitly.
     assigned = {normalise_product(item) for item in _json_list(assigned_products)}
-    if assigned:
+    if assigned and role_key != "administrator":
         result = [item for item in result if normalise_product(item) in assigned]
     return result
 
