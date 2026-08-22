@@ -6,6 +6,7 @@ import hmac
 import json
 import os
 import re
+import secrets
 from pathlib import Path
 import shutil
 import time
@@ -36,7 +37,7 @@ from app.core.security import (
     verify_password,
 )
 from app.db.session import engine, get_db
-from app.models import AuditLog, BillingWebhookEvent, Club, ClubMember, CrashReport, DeviceActivation, DeviceAuditLog, Licence, LicenceTemplate, Organisation, OrganisationSubscription, Product, Release, RemoteCommand, Sport, User
+from app.models import AuditLog, BetaAccessCode, BetaCodeRedemption, BillingWebhookEvent, Club, ClubMember, CrashReport, DeviceActivation, DeviceAuditLog, Licence, LicenceTemplate, Organisation, OrganisationAccessGrant, OrganisationSubscription, Product, Release, RemoteCommand, Sport, User
 from app.core.config import get_settings
 from app.releases import MAX_PACKAGE_BYTES as MAX_RELEASE_PACKAGE_BYTES, PACKAGES_DIR as RELEASE_PACKAGES_DIR, validate_release_package
 
@@ -390,6 +391,332 @@ def dashboard(request: Request, db: Session = Depends(get_db)):
             "json": json,
         },
     )
+
+
+
+def _platform_portal_admin(request: Request, db: Session) -> User:
+    admin = require_portal_admin(request, db)
+    if admin.organisation_id is not None or not admin.is_admin:
+        raise HTTPException(status_code=403, detail="FAST platform administrator access required")
+    return admin
+
+
+def _json_values(raw: str | None, fallback=None):
+    try:
+        value = json.loads(raw or "")
+    except (TypeError, ValueError):
+        return [] if fallback is None else fallback
+    return value
+
+
+def _beta_code_hash(code: str) -> str:
+    return hashlib.sha256(code.strip().upper().encode("utf-8")).hexdigest()
+
+
+def _new_beta_access_code() -> str:
+    return "FAST-BETA-" + secrets.token_hex(4).upper()
+
+
+def _parse_admin_expiry(value: str, *, end_of_day: bool = False) -> datetime | None:
+    clean = (value or "").strip()
+    if not clean:
+        return None
+    try:
+        parsed = datetime.fromisoformat(clean)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="Enter a valid expiry date/time.") from exc
+    if parsed.tzinfo is None:
+        if end_of_day and "T" not in clean:
+            parsed = parsed.replace(hour=23, minute=59, second=59)
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _access_programmes_context(
+    request: Request,
+    db: Session,
+    admin: User,
+    *,
+    message: str = "",
+    error: str = "",
+    generated_code: str = "",
+):
+    organisations = db.scalars(select(Organisation).order_by(Organisation.name.asc())).all()
+    products = db.scalars(select(Product).where(Product.active.is_(True)).order_by(Product.name.asc())).all()
+    sports = db.scalars(select(Sport).where(Sport.active.is_(True)).order_by(Sport.name.asc())).all()
+    beta_codes = db.scalars(select(BetaAccessCode).order_by(BetaAccessCode.id.desc())).all()
+    grants = db.scalars(select(OrganisationAccessGrant).order_by(OrganisationAccessGrant.id.desc())).all()
+
+    org_map = {item.id: item for item in organisations}
+    beta_map = {item.id: item for item in beta_codes}
+    user_ids = {item.created_by_user_id for item in grants if item.created_by_user_id}
+    users = db.scalars(select(User).where(User.id.in_(user_ids))).all() if user_ids else []
+    user_map = {item.id: item for item in users}
+
+    redemptions = db.execute(
+        select(BetaCodeRedemption, Organisation, User)
+        .join(Organisation, Organisation.id == BetaCodeRedemption.organisation_id)
+        .join(User, User.id == BetaCodeRedemption.user_id)
+        .order_by(BetaCodeRedemption.id.desc())
+    ).all()
+
+    active_overrides = []
+    now = datetime.now(timezone.utc)
+    for grant in grants:
+        if grant.grant_type != "override" or not grant.active:
+            continue
+        expiry = grant.expires_at
+        if expiry and (expiry.replace(tzinfo=timezone.utc) if expiry.tzinfo is None else expiry.astimezone(timezone.utc)) <= now:
+            continue
+        active_overrides.append({
+            "grant": grant,
+            "organisation": org_map.get(grant.organisation_id),
+            "products": _json_values(grant.products_json, []),
+            "sports": _json_values(grant.sports_json, []),
+            "features": _json_values(grant.features_json, {}),
+            "creator": user_map.get(grant.created_by_user_id),
+        })
+
+    code_rows = []
+    for item in beta_codes:
+        code_rows.append({
+            "item": item,
+            "products": _json_values(item.products_json, []),
+            "sports": _json_values(item.sports_json, []),
+            "features": _json_values(item.features_json, {}),
+        })
+
+    redemption_rows = []
+    for redemption, organisation, user in redemptions:
+        grant = db.get(OrganisationAccessGrant, redemption.grant_id) if redemption.grant_id else None
+        redemption_rows.append({
+            "redemption": redemption,
+            "organisation": organisation,
+            "user": user,
+            "code": beta_map.get(redemption.beta_code_id),
+            "grant": grant,
+        })
+
+    return {
+        "admin": admin,
+        "organisations": organisations,
+        "products": products,
+        "sports": sports,
+        "beta_codes": code_rows,
+        "active_overrides": active_overrides,
+        "redemptions": redemption_rows,
+        "message": message,
+        "error": error,
+        "generated_code": generated_code,
+        "now": now,
+    }
+
+
+@router.get("/access-programmes", response_class=HTMLResponse)
+def access_programmes_page(request: Request, db: Session = Depends(get_db)):
+    admin = _platform_portal_admin(request, db)
+    return templates.TemplateResponse(request, "access_programmes.html", _access_programmes_context(request, db, admin))
+
+
+@router.post("/access-programmes/beta-codes", response_class=HTMLResponse)
+def create_beta_code_portal(
+    request: Request,
+    label: str = Form(""),
+    tier: str = Form("FAST Beta"),
+    products: list[str] = Form([]),
+    sports: list[str] = Form([]),
+    remote_management: str = Form("false"),
+    priority_support: str = Form("false"),
+    max_devices: int = Form(2),
+    max_users: int = Form(2),
+    release_channel: str = Form("beta"),
+    duration_days: int = Form(60),
+    max_redemptions: int = Form(1),
+    expires_at: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    admin = _platform_portal_admin(request, db)
+    try:
+        if not products:
+            raise ValueError("Select at least one FAST product.")
+        if not sports:
+            raise ValueError("Select at least one sport.")
+        if release_channel not in {"stable", "beta", "internal", "alpha"}:
+            raise ValueError("Choose a valid release channel.")
+        if not 1 <= int(duration_days) <= 730:
+            raise ValueError("Access duration must be between 1 and 730 days.")
+        if not 1 <= int(max_redemptions) <= 10000:
+            raise ValueError("Maximum redemptions must be between 1 and 10,000.")
+        if not 1 <= int(max_devices) <= 1000 or not 1 <= int(max_users) <= 1000:
+            raise ValueError("Users and devices must be at least 1.")
+        expiry = _parse_admin_expiry(expires_at, end_of_day=True)
+        code = _new_beta_access_code()
+        item = BetaAccessCode(
+            code_hash=_beta_code_hash(code),
+            code_last_four=code[-4:],
+            label=(label.strip() or None),
+            tier=(tier.strip() or "FAST Beta"),
+            products_json=json.dumps(sorted(set(products))),
+            sports_json=json.dumps(sorted(set(sports))),
+            features_json=json.dumps({
+                "remote_management": remote_management == "true",
+                "priority_support": priority_support == "true",
+            }),
+            max_devices=int(max_devices),
+            max_users=int(max_users),
+            release_channel=release_channel.lower(),
+            duration_days=int(duration_days),
+            max_redemptions=int(max_redemptions),
+            expires_at=expiry,
+            created_by_user_id=admin.id,
+        )
+        db.add(item)
+        db.flush()
+        _record_audit(
+            db, admin, "beta_code_created", "licensing",
+            target_type="beta_code", target_id=item.id,
+            target_label=item.label or f"Beta code ••••{item.code_last_four}",
+            details=f"Beta code created; channel={item.release_channel}; duration={item.duration_days}d; max redemptions={item.max_redemptions}.",
+        )
+        db.commit()
+        return templates.TemplateResponse(
+            request, "access_programmes.html",
+            _access_programmes_context(request, db, admin, message="Beta access code created.", generated_code=code),
+        )
+    except (ValueError, HTTPException) as exc:
+        db.rollback()
+        detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
+        return templates.TemplateResponse(
+            request, "access_programmes.html",
+            _access_programmes_context(request, db, admin, error=detail),
+            status_code=422,
+        )
+
+
+@router.post("/access-programmes/beta-codes/{code_id}/revoke")
+def revoke_beta_code_portal(code_id: int, request: Request, db: Session = Depends(get_db)):
+    admin = _platform_portal_admin(request, db)
+    item = db.get(BetaAccessCode, code_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Beta code not found")
+    item.active = False
+    now = datetime.now(timezone.utc)
+    grants = db.scalars(select(OrganisationAccessGrant).where(
+        OrganisationAccessGrant.source_beta_code_id == item.id,
+        OrganisationAccessGrant.active.is_(True),
+    )).all()
+    for grant in grants:
+        grant.active = False
+        grant.revoked_at = now
+    _record_audit(
+        db, admin, "beta_code_revoked", "licensing",
+        target_type="beta_code", target_id=item.id,
+        target_label=item.label or f"Beta code ••••{item.code_last_four}",
+        details=f"Beta code revoked; {len(grants)} active beta access grant(s) revoked.",
+    )
+    db.commit()
+    return RedirectResponse("/admin/access-programmes", status_code=303)
+
+
+@router.post("/access-programmes/overrides")
+def create_access_override_portal(
+    request: Request,
+    organisation_id: int = Form(...),
+    tier: str = Form("Professional"),
+    products: list[str] = Form([]),
+    sports: list[str] = Form([]),
+    remote_management: str = Form("false"),
+    priority_support: str = Form("false"),
+    max_devices: int = Form(5),
+    max_users: int = Form(5),
+    release_channel: str = Form("stable"),
+    expires_at: str = Form(""),
+    reason: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    admin = _platform_portal_admin(request, db)
+    organisation = db.get(Organisation, organisation_id)
+    if not organisation:
+        raise HTTPException(status_code=404, detail="Organisation not found")
+    if not products or not sports:
+        raise HTTPException(status_code=422, detail="Select at least one product and sport.")
+    expiry = _parse_admin_expiry(expires_at)
+    now = datetime.now(timezone.utc)
+    for old in db.scalars(select(OrganisationAccessGrant).where(
+        OrganisationAccessGrant.organisation_id == organisation_id,
+        OrganisationAccessGrant.active.is_(True),
+    )).all():
+        old.active = False
+        old.revoked_at = now
+    grant = OrganisationAccessGrant(
+        organisation_id=organisation_id,
+        grant_type="override",
+        tier=tier.strip() or "Professional",
+        products_json=json.dumps(sorted(set(products))),
+        sports_json=json.dumps(sorted(set(sports))),
+        features_json=json.dumps({
+            "remote_management": remote_management == "true",
+            "priority_support": priority_support == "true",
+        }),
+        max_devices=max(1, int(max_devices)),
+        max_users=max(1, int(max_users)),
+        release_channel=release_channel.lower(),
+        expires_at=expiry,
+        created_by_user_id=admin.id,
+    )
+    db.add(grant)
+    db.flush()
+    _record_audit(
+        db, admin, "access_override_granted", "licensing",
+        target_type="organisation", target_id=organisation.id, target_label=organisation.name,
+        details=reason.strip() or f"Temporary {grant.tier} override granted from Cloud Admin.",
+    )
+    db.commit()
+    return RedirectResponse("/admin/access-programmes", status_code=303)
+
+
+@router.post("/access-programmes/overrides/{organisation_id}/revoke")
+def revoke_access_override_portal(organisation_id: int, request: Request, db: Session = Depends(get_db)):
+    admin = _platform_portal_admin(request, db)
+    organisation = db.get(Organisation, organisation_id)
+    if not organisation:
+        raise HTTPException(status_code=404, detail="Organisation not found")
+    now = datetime.now(timezone.utc)
+    count = 0
+    for grant in db.scalars(select(OrganisationAccessGrant).where(
+        OrganisationAccessGrant.organisation_id == organisation_id,
+        OrganisationAccessGrant.grant_type == "override",
+        OrganisationAccessGrant.active.is_(True),
+    )).all():
+        grant.active = False
+        grant.revoked_at = now
+        count += 1
+    _record_audit(
+        db, admin, "access_override_revoked", "licensing",
+        target_type="organisation", target_id=organisation.id, target_label=organisation.name,
+        details=f"{count} temporary access override(s) revoked.",
+    )
+    db.commit()
+    return RedirectResponse("/admin/access-programmes", status_code=303)
+
+
+@router.post("/access-programmes/grants/{grant_id}/revoke")
+def revoke_individual_access_grant_portal(grant_id: int, request: Request, db: Session = Depends(get_db)):
+    admin = _platform_portal_admin(request, db)
+    grant = db.get(OrganisationAccessGrant, grant_id)
+    if not grant:
+        raise HTTPException(status_code=404, detail="Access grant not found")
+    grant.active = False
+    grant.revoked_at = datetime.now(timezone.utc)
+    organisation = db.get(Organisation, grant.organisation_id)
+    _record_audit(
+        db, admin, "access_grant_revoked", "licensing",
+        target_type="organisation", target_id=grant.organisation_id,
+        target_label=organisation.name if organisation else str(grant.organisation_id),
+        details=f"Access grant {grant.id} ({grant.grant_type}) revoked from Cloud Admin.",
+    )
+    db.commit()
+    return RedirectResponse("/admin/access-programmes", status_code=303)
 
 
 @router.get("/users/new", response_class=HTMLResponse)

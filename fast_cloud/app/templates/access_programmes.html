@@ -1,0 +1,97 @@
+{% extends "base.html" %}
+{% block title %}Access Programmes | FAST Cloud Admin{% endblock %}
+{% block content %}
+<div class="page-heading">
+  <div><h1>Access Programmes</h1><p>Manage temporary organisation overrides and invited FAST Beta access without changing Stripe billing.</p></div>
+</div>
+{% if message %}<div class="alert success">{{ message }}</div>{% endif %}
+{% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+{% if generated_code %}
+<section class="generated beta-code-reveal">
+  <span>New beta code — copy this now. FAST stores only a hash and the final four characters.</span>
+  <code>{{ generated_code }}</code>
+  <p class="muted">This full code will not be shown again after you leave this page.</p>
+</section>
+{% endif %}
+
+<div class="access-grid">
+<section class="panel">
+  <div class="panel-heading"><div><h2>Create Beta Code</h2><p>Give invited analysts time-limited FAST access without taking payment.</p></div></div>
+  <form class="form-grid" method="post" action="/admin/access-programmes/beta-codes">
+    {% set _csrf = csrf_token(request) %}{% if _csrf %}<input type="hidden" name="csrf_token" value="{{ _csrf }}">{% endif %}
+    <label>Internal label<input name="label" placeholder="e.g. Football analyst cohort 1"></label>
+    <label>Access tier<input name="tier" value="FAST Beta"></label>
+    <label>Release channel<select name="release_channel"><option value="beta" selected>Beta</option><option value="internal">Alpha / Internal</option><option value="stable">Stable</option></select></label>
+    <label>Access duration after redemption<input type="number" name="duration_days" min="1" max="730" value="60"><small>Days from each analyst's redemption date.</small></label>
+    <label>Code redeem-by date<input type="date" name="expires_at"><small>Optional. New redemptions stop after this date.</small></label>
+    <label>Maximum redemptions<input type="number" name="max_redemptions" min="1" max="10000" value="1"></label>
+    <label>Maximum users<input type="number" name="max_users" min="1" max="1000" value="2"></label>
+    <label>Maximum devices<input type="number" name="max_devices" min="1" max="1000" value="2"></label>
+    <label class="wide">Products<div class="checks">{% for product in products %}<label class="check"><input type="checkbox" name="products" value="{{ product.key }}" {% if product.key in ['analysis','viewer'] %}checked{% endif %}> {{ product.name }}</label>{% endfor %}</div></label>
+    <label class="wide">Sports<div class="checks sport-checks">{% for sport in sports %}<label class="check"><input type="checkbox" name="sports" value="{{ sport.key }}" {% if sport.key == 'football' %}checked{% endif %}> {{ sport.name }}</label>{% endfor %}</div></label>
+    <label class="wide">Features<div class="checks"><label class="check"><input type="checkbox" name="remote_management" value="true"> Remote management</label><label class="check"><input type="checkbox" name="priority_support" value="true"> Priority support</label></div></label>
+    <div class="wide actions"><button class="primary" type="submit">Generate Beta Code</button></div>
+  </form>
+</section>
+
+<section class="panel">
+  <div class="panel-heading"><div><h2>Temporary Organisation Override</h2><p>Change effective FAST access while leaving the organisation's Stripe subscription untouched.</p></div></div>
+  <form class="form-grid" method="post" action="/admin/access-programmes/overrides">
+    {% set _csrf = csrf_token(request) %}{% if _csrf %}<input type="hidden" name="csrf_token" value="{{ _csrf }}">{% endif %}
+    <label class="wide">Organisation<select name="organisation_id" required><option value="">Select organisation</option>{% for org in organisations %}<option value="{{ org.id }}">{{ org.name }} — {{ org.subscription_tier }}</option>{% endfor %}</select></label>
+    <label>Effective tier<input name="tier" value="Professional"></label>
+    <label>Expires at<input type="datetime-local" name="expires_at"></label>
+    <label>Release channel<select name="release_channel"><option value="stable">Stable</option><option value="beta">Beta</option><option value="internal">Alpha / Internal</option></select></label>
+    <label>Maximum users<input type="number" name="max_users" min="1" value="5"></label>
+    <label>Maximum devices<input type="number" name="max_devices" min="1" value="5"></label>
+    <label class="wide">Products<div class="checks">{% for product in products %}<label class="check"><input type="checkbox" name="products" value="{{ product.key }}" {% if product.key in ['analysis','viewer'] %}checked{% endif %}> {{ product.name }}</label>{% endfor %}</div></label>
+    <label class="wide">Sports<div class="checks sport-checks">{% for sport in sports %}<label class="check"><input type="checkbox" name="sports" value="{{ sport.key }}" {% if sport.key == 'football' %}checked{% endif %}> {{ sport.name }}</label>{% endfor %}</div></label>
+    <label class="wide">Features<div class="checks"><label class="check"><input type="checkbox" name="remote_management" value="true" checked> Remote management</label><label class="check"><input type="checkbox" name="priority_support" value="true" checked> Priority support</label></div></label>
+    <label class="wide">Reason<textarea name="reason" rows="2" placeholder="e.g. Internal production testing"></textarea></label>
+    <div class="wide actions"><button class="primary" type="submit">Apply Override</button></div>
+  </form>
+</section>
+</div>
+
+<section class="panel">
+  <div class="panel-heading"><div><h2>Beta Codes</h2><p>{{ beta_codes|length }} code{% if beta_codes|length != 1 %}s{% endif %} created.</p></div></div>
+  <div class="table-wrap"><table><thead><tr><th>Code</th><th>Entitlement</th><th>Limits</th><th>Redeem by</th><th>Status</th><th></th></tr></thead><tbody>
+  {% for row in beta_codes %}{% set item=row.item %}<tr>
+    <td><strong>{{ item.label or 'Unlabelled beta code' }}</strong><br><span class="muted">FAST-BETA-••••{{ item.code_last_four }}</span></td>
+    <td>{{ item.tier }} · {{ item.release_channel|title }}<br><span class="muted">{{ row.products|join(', ') }} · {{ row.sports|join(', ') }}</span></td>
+    <td>{{ item.redemption_count }} / {{ item.max_redemptions }} redeemed<br><span class="muted">{{ item.duration_days }} days · {{ item.max_users }} users · {{ item.max_devices }} devices</span></td>
+    <td>{% if item.expires_at %}{{ item.expires_at.strftime('%d.%m.%Y') }}{% else %}No redeem-by date{% endif %}</td>
+    <td>{% if not item.active %}<span class="badge revoked">Revoked</span>{% elif item.expires_at and item.expires_at <= now.replace(tzinfo=item.expires_at.tzinfo) %}<span class="badge expired">Expired</span>{% elif item.redemption_count >= item.max_redemptions %}<span class="badge suspended">Used up</span>{% else %}<span class="badge active">Active</span>{% endif %}</td>
+    <td>{% if item.active %}<form method="post" action="/admin/access-programmes/beta-codes/{{ item.id }}/revoke" onsubmit="return confirm('Revoke this beta code and all active access granted from it?')">{% set _csrf = csrf_token(request) %}{% if _csrf %}<input type="hidden" name="csrf_token" value="{{ _csrf }}">{% endif %}<button class="danger" type="submit">Revoke</button></form>{% endif %}</td>
+  </tr>{% else %}<tr><td colspan="6">No beta codes created yet.</td></tr>{% endfor %}
+  </tbody></table></div>
+</section>
+
+<section class="panel">
+  <div class="panel-heading"><div><h2>Active Overrides</h2><p>Temporary entitlements layered over normal billing.</p></div></div>
+  <div class="table-wrap"><table><thead><tr><th>Organisation</th><th>Effective access</th><th>Limits</th><th>Expires</th><th></th></tr></thead><tbody>
+  {% for row in active_overrides %}<tr>
+    <td><strong>{{ row.organisation.name if row.organisation else row.grant.organisation_id }}</strong><br><span class="muted">Underlying billing is unchanged</span></td>
+    <td>{{ row.grant.tier }} · {{ row.grant.release_channel|title }}<br><span class="muted">{{ row.products|join(', ') }} · {{ row.sports|join(', ') }}</span></td>
+    <td>{{ row.grant.max_users }} users · {{ row.grant.max_devices }} devices</td>
+    <td>{% if row.grant.expires_at %}{{ row.grant.expires_at.strftime('%d.%m.%Y %H:%M') }}{% else %}No expiry{% endif %}</td>
+    <td><form method="post" action="/admin/access-programmes/overrides/{{ row.grant.organisation_id }}/revoke" onsubmit="return confirm('Remove this temporary override? The organisation will return to its normal paid entitlement.')">{% set _csrf = csrf_token(request) %}{% if _csrf %}<input type="hidden" name="csrf_token" value="{{ _csrf }}">{% endif %}<button class="danger" type="submit">Revoke override</button></form></td>
+  </tr>{% else %}<tr><td colspan="5">No active organisation overrides.</td></tr>{% endfor %}
+  </tbody></table></div>
+</section>
+
+<section class="panel">
+  <div class="panel-heading"><div><h2>Beta Redemptions</h2><p>Track who redeemed each beta code and revoke individual access when required.</p></div></div>
+  <div class="table-wrap"><table><thead><tr><th>Tester</th><th>Organisation</th><th>Code</th><th>Redeemed</th><th>Terms</th><th>Access</th><th></th></tr></thead><tbody>
+  {% for row in redemptions %}<tr>
+    <td><strong>{{ row.user.full_name or row.user.email }}</strong><br><span class="muted">{{ row.user.email }}</span></td>
+    <td>{{ row.organisation.name }}</td>
+    <td>{{ row.code.label if row.code and row.code.label else 'Beta code' }}{% if row.code %}<br><span class="muted">••••{{ row.code.code_last_four }}</span>{% endif %}</td>
+    <td>{{ row.redemption.redeemed_at.strftime('%d.%m.%Y %H:%M') }}</td>
+    <td>{{ row.redemption.beta_terms_version }}</td>
+    <td>{% if row.grant and row.grant.active %}<span class="badge active">Active</span>{% else %}<span class="badge revoked">Ended</span>{% endif %}</td>
+    <td>{% if row.grant and row.grant.active %}<form method="post" action="/admin/access-programmes/grants/{{ row.grant.id }}/revoke" onsubmit="return confirm('Revoke this tester\'s beta access?')">{% set _csrf = csrf_token(request) %}{% if _csrf %}<input type="hidden" name="csrf_token" value="{{ _csrf }}">{% endif %}<button class="danger" type="submit">Revoke access</button></form>{% endif %}</td>
+  </tr>{% else %}<tr><td colspan="7">No beta codes have been redeemed yet.</td></tr>{% endfor %}
+  </tbody></table></div>
+</section>
+{% endblock %}
